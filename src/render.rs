@@ -1,10 +1,11 @@
 //! Pure: no I/O, no environment; `main` prints the returned strings.
 
+use std::fmt::Display;
 use std::iter;
 use std::slice;
 
 use comfy_table::{ContentArrangement, Table, presets};
-use itertools::Itertools;
+use itertools::Itertools as _;
 use serde_json::{Map, Value as Json, json};
 
 use crate::app::{AppError, Output};
@@ -81,9 +82,15 @@ pub fn render(o: &Output, opts: &RenderOpts) -> String {
         Format::Jsonl => shape(o, opts.typing)
             .records()
             .into_iter()
-            .map(|j| j.to_string() + "\n")
+            .map(|j| line(&j))
             .collect(),
     }
+}
+
+fn line(text: &(impl Display + ?Sized)) -> String {
+    let mut out = text.to_string();
+    out.push('\n');
+    out
 }
 
 /// Every variant is listed, so a new one forces a decision here. Messages can carry server or
@@ -124,7 +131,7 @@ pub fn render_error(e: &AppError, t: &DbTarget) -> String {
     };
     lines
         .into_iter()
-        .map(|line| escape_controls(&line) + "\n")
+        .map(|text| line(&escape_controls(&text)))
         .collect()
 }
 
@@ -326,9 +333,10 @@ fn entries_grid(entries: &[(String, Json)]) -> Grid {
 }
 
 fn cell(j: &Json) -> String {
-    match j {
-        Json::String(s) => s.clone(),
-        other => other.to_string(),
+    if let Json::String(s) = j {
+        s.clone()
+    } else {
+        j.to_string()
     }
 }
 
@@ -360,7 +368,6 @@ fn table_text(g: &Grid) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::domain::{
@@ -667,7 +674,7 @@ mod tests {
             select: None,
         };
         let spec = match required_index(&q) {
-            Some(crate::domain::IndexAdvice::Composite(s)) => s,
+            Some(IndexAdvice::Composite(s)) => s,
             other => panic!("{other:?}"),
         };
         let o = Output::Indexes(vec![IndexInfo {
@@ -760,12 +767,12 @@ mod tests {
 
     #[test]
     fn missing_index_with_advice_but_no_url_omits_the_link() {
-        let e = match missing_index() {
-            AppError::MissingIndex { advice, .. } => AppError::MissingIndex {
-                advice,
-                console_url: None,
-            },
-            other => other,
+        let AppError::MissingIndex { advice, .. } = missing_index() else {
+            panic!("not a missing-index error")
+        };
+        let e = AppError::MissingIndex {
+            advice,
+            console_url: None,
         };
         let out = render_error(&e, &target());
         let lines: Vec<&str> = out.lines().collect();
@@ -788,10 +795,7 @@ mod tests {
             select: None,
         };
         let advice = required_index(&q);
-        assert!(matches!(
-            advice,
-            Some(crate::domain::IndexAdvice::SingleField { .. })
-        ));
+        assert!(matches!(advice, Some(IndexAdvice::SingleField { .. })));
         let e = AppError::MissingIndex {
             advice,
             console_url: Some("https://console/idx".to_owned()),

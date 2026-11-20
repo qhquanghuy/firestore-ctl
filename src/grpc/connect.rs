@@ -26,21 +26,21 @@ const GOOGLE_URL: &str = "https://firestore.googleapis.com";
 const STEP_TIMEOUT: Duration = Duration::from_secs(10);
 const CHANNEL_TIMEOUT: Duration = Duration::from_secs(5);
 /// Covers a whole stream, start to last message.
-pub const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+pub(super) const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 const ROUTING_HEADER: &str = "x-goog-request-params";
 
 /// Names the database every request belongs to, so a named one is never replaced by `(default)`.
-pub fn resource_prefix(t: &DbTarget) -> String {
+pub(super) fn resource_prefix(t: &DbTarget) -> String {
     t.database_path()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Endpoint {
+pub(super) enum Endpoint {
     Emulator(String),
     Google,
 }
 
-pub fn endpoint(env: impl Fn(&str) -> Option<String>) -> Endpoint {
+pub(super) fn endpoint(env: impl Fn(&str) -> Option<String>) -> Endpoint {
     env("FIRESTORE_EMULATOR_HOST")
         .map(|host| host.trim().to_owned())
         .filter(|host| !host.is_empty())
@@ -54,7 +54,7 @@ pub fn endpoint(env: impl Fn(&str) -> Option<String>) -> Endpoint {
 }
 
 /// Percent-encoded the way Google's own clients do (`/` kept).
-pub fn routing_param(key: &str, value: &str) -> String {
+pub(super) fn routing_param(key: &str, value: &str) -> String {
     let encoded: String = value
         .bytes()
         .map(|b| match b {
@@ -67,7 +67,7 @@ pub fn routing_param(key: &str, value: &str) -> String {
     format!("{key}={encoded}")
 }
 
-pub fn routed<T>(message: T, key: &str, value: &str) -> Request<T> {
+pub(super) fn routed<T>(message: T, key: &str, value: &str) -> Request<T> {
     let mut request = Request::new(message);
     // The entry is percent-encoded ASCII, so this cannot fail; if it somehow did, the
     // `google-cloud-resource-prefix` header still names the database.
@@ -96,8 +96,9 @@ struct StaticBearer {
 
 impl StaticBearer {
     fn new(token: &str) -> Result<Self, GatewayError> {
-        let mut value = HeaderValue::from_str(&format!("Bearer {token}"))
-            .map_err(|_| GatewayError::Auth("the access token is not a valid header".to_owned()))?;
+        let mut value = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_invalid| {
+            GatewayError::Auth("the access token is not a valid header".to_owned())
+        })?;
         value.set_sensitive(true);
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -121,8 +122,10 @@ impl fmt::Debug for StaticBearer {
     }
 }
 
-// The trait declares `impl Future`; the bodies have nothing to await.
-#[allow(clippy::unused_async_trait_impl)]
+#[expect(
+    clippy::unused_async_trait_impl,
+    reason = "the trait declares `impl Future`; the bodies have nothing to await"
+)]
 impl CredentialsProvider for StaticBearer {
     async fn headers(
         &self,
@@ -311,7 +314,7 @@ async fn google_headers() -> Result<GoogleAuthHeaders, GatewayError> {
 /// Every request carries `google-cloud-resource-prefix: projects/P/databases/D`, and no call
 /// (stream included) may take longer than [`CALL_TIMEOUT`]. Opening takes at most 15 seconds:
 /// the credential source gets ten, the channel five.
-pub async fn open(
+pub(super) async fn open(
     t: &DbTarget,
     endpoint: &Endpoint,
 ) -> Result<GoogleApi<FirestoreClient<GoogleAuthMiddleware>>, GatewayError> {
@@ -329,19 +332,19 @@ pub async fn open(
         GoogleApi::from_function_with_middleware(FirestoreClient::new, url, layer),
     )
     .await
-    .map_err(|_| other(format!("timed out connecting to Firestore at {url}")))?
+    .map_err(|_elapsed| other(format!("timed out connecting to Firestore at {url}")))?
     .map(|api| api.with_request_timeouts(RequestTimeouts::new().with_total(CALL_TIMEOUT)))
     .map_err(|e| {
-        let detail = match e.kind() {
-            ErrorKind::GrpcStatus(transport) => error_chain(transport),
-            _ => e.to_string(),
+        let detail = if let ErrorKind::GrpcStatus(transport) = e.kind() {
+            error_chain(transport)
+        } else {
+            e.to_string()
         };
         other(format!("cannot connect to Firestore at {url}: {detail}"))
     })
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::grpc::test_util::target;

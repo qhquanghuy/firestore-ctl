@@ -1,10 +1,10 @@
-#![allow(clippy::print_stderr)]
+#![expect(clippy::print_stderr, reason = "main is the only place that prints")]
 
-use std::io::{self, IsTerminal, Write as _};
+use std::io::{self, IsTerminal as _, Write as _};
 use std::process::ExitCode;
 
 use clap::error::ErrorKind;
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory as _, Parser as _};
 use clap_complete::CompleteEnv;
 use firectl::app::{self, AppError, Context};
 use firectl::cli::{Cli, Cmd, truncation_note};

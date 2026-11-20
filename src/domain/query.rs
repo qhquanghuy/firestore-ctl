@@ -22,17 +22,17 @@ pub enum Op {
 }
 
 impl Op {
-    pub const ALL: [Op; 10] = [
-        Op::Eq,
-        Op::Ne,
-        Op::Lt,
-        Op::Le,
-        Op::Gt,
-        Op::Ge,
-        Op::In,
-        Op::NotIn,
-        Op::ArrayContains,
-        Op::ArrayContainsAny,
+    pub const ALL: [Self; 10] = [
+        Self::Eq,
+        Self::Ne,
+        Self::Lt,
+        Self::Le,
+        Self::Gt,
+        Self::Ge,
+        Self::In,
+        Self::NotIn,
+        Self::ArrayContains,
+        Self::ArrayContainsAny,
     ];
 
     #[must_use]
@@ -166,7 +166,6 @@ pub struct AggregateQuery {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

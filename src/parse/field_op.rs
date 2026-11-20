@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use super::{ParseError, parse_field, parse_token, unquoted};
+use super::{ParseError, parse_field, parse_token, split_around, unquoted};
 use crate::domain::{FieldOp, Value};
 
 const FIELD_HINT: &str =
@@ -11,11 +11,14 @@ impl FromStr for FieldOp {
 
     fn from_str(s: &str) -> Result<Self, ParseError> {
         let fail = |reason: String| ParseError::new(s, reason);
-        let (eq, _) = unquoted(s, '`').find(|&(_, c)| c == '=').ok_or_else(|| {
-            fail("expected `field=value`, `field+=value` or `field-=value`".to_owned())
-        })?;
+        let (before, _, text) = unquoted(s, '`')
+            .find(|&(_, c)| c == '=')
+            .and_then(|(eq, _)| split_around(s, eq))
+            .ok_or_else(|| {
+                fail("expected `field=value`, `field+=value` or `field-=value`".to_owned())
+            })?;
         let field = |text: &str| parse_field(text, FIELD_HINT).map_err(fail);
-        let text = s[eq + 1..].trim();
+        let text = text.trim();
         if text.starts_with('=') {
             return Err(ParseError::new(
                 s,
@@ -23,7 +26,7 @@ impl FromStr for FieldOp {
             ));
         }
         let value = parse_token(text).map_err(|e| ParseError::new(s, e.reason))?;
-        let before = s[..eq].trim_end();
+        let before = before.trim_end();
         if let Some(name) = before.strip_suffix('+') {
             Ok(Self::ArrayUnion(field(name)?, elements(s, text, value)?))
         } else if let Some(name) = before.strip_suffix('-') {
@@ -35,9 +38,10 @@ impl FromStr for FieldOp {
 }
 
 fn elements(input: &str, text: &str, value: Value) -> Result<Vec<Value>, ParseError> {
-    let items = match value {
-        Value::Array(items) => items,
-        single => vec![single],
+    let items = if let Value::Array(items) = value {
+        items
+    } else {
+        vec![value]
     };
     if text.is_empty() || items.is_empty() {
         Err(ParseError::new(
@@ -50,7 +54,6 @@ fn elements(input: &str, text: &str, value: Value) -> Result<Vec<Value>, ParseEr
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::domain::FieldPath;

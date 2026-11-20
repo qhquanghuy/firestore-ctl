@@ -7,7 +7,7 @@ use crate::port::GatewayError;
 /// A failed precondition is classified by [`write_error`] (it depends on the write's guard); elsewhere it
 /// is a missing index only if its message says so.
 #[must_use]
-pub fn map_status(s: &Status, path: Option<&DocPath>) -> GatewayError {
+pub(super) fn map_status(s: &Status, path: Option<&DocPath>) -> GatewayError {
     let message = s.message();
     match (s.code(), path) {
         (Code::NotFound, Some(p)) if !names_missing_database(message) => {
@@ -40,7 +40,7 @@ pub fn map_status(s: &Status, path: Option<&DocPath>) -> GatewayError {
 /// [`GatewayError::PreconditionFailed`]. Without a guard, `FAILED_PRECONDITION` is not the document's
 /// doing and `NOT_FOUND` means the document is missing.
 #[must_use]
-pub fn write_error(s: &Status, w: &Write) -> GatewayError {
+pub(super) fn write_error(s: &Status, w: &Write) -> GatewayError {
     let precondition = || GatewayError::PreconditionFailed(w.path().clone());
     match (s.code(), w.guard()) {
         (Code::FailedPrecondition, Some(_)) => precondition(),
@@ -69,7 +69,6 @@ fn first_https_url(message: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::grpc::test_util::doc;

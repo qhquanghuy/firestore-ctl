@@ -73,8 +73,10 @@ pub enum GatewayError {
     Other(String),
 }
 
-// The futures are awaited in place and never spawned, so the missing `Send` bounds are irrelevant.
-#[allow(async_fn_in_trait)]
+#[expect(
+    async_fn_in_trait,
+    reason = "futures are awaited in place and never spawned, so `Send` bounds are irrelevant"
+)]
 pub trait Firestore {
     async fn get(&self, p: &DocPath) -> Result<Option<Document>, GatewayError>;
 

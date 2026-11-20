@@ -11,7 +11,7 @@ use firectl::domain::{
 use firectl::policy::WriteAccess;
 use firectl::port::{AggregateResult, Firestore, GatewayError, IndexInfo, Written};
 
-pub fn default_target() -> DbTarget {
+pub(crate) fn default_target() -> DbTarget {
     DbTarget {
         project: "p".parse().expect("valid project"),
         database: "d".parse().expect("valid database"),
@@ -19,7 +19,7 @@ pub fn default_target() -> DbTarget {
 }
 
 #[derive(Debug)]
-pub struct FakeFirestore {
+pub(crate) struct FakeFirestore {
     target: DbTarget,
     docs: RefCell<BTreeMap<DocPath, Document>>,
     calls: RefCell<Vec<&'static str>>,
@@ -34,7 +34,7 @@ impl Default for FakeFirestore {
 }
 
 impl FakeFirestore {
-    pub fn for_target(target: DbTarget) -> Self {
+    pub(crate) fn for_target(target: DbTarget) -> Self {
         Self {
             target,
             docs: RefCell::default(),
@@ -44,24 +44,24 @@ impl FakeFirestore {
         }
     }
 
-    pub fn with(doc: Document) -> Self {
+    pub(crate) fn with(doc: Document) -> Self {
         let fake = Self::default();
         fake.docs.borrow_mut().insert(doc.path.clone(), doc);
         fake
     }
 
-    pub fn without_index(self) -> Self {
+    pub(crate) fn without_index(self) -> Self {
         Self {
             index_missing: true,
             ..self
         }
     }
 
-    pub fn calls(&self) -> Vec<&'static str> {
+    pub(crate) fn calls(&self) -> Vec<&'static str> {
         self.calls.borrow().clone()
     }
 
-    pub fn stored(&self, p: &DocPath) -> Option<Document> {
+    pub(crate) fn stored(&self, p: &DocPath) -> Option<Document> {
         self.docs.borrow().get(p).cloned()
     }
 
@@ -207,8 +207,10 @@ fn in_scope(scope: &Scope, d: &Document) -> bool {
     }
 }
 
-// The fake is synchronous inside; the trait is async because the real adapter is.
-#[allow(clippy::unused_async_trait_impl)]
+#[expect(
+    clippy::unused_async_trait_impl,
+    reason = "the fake is synchronous inside; the trait is async because the real adapter is"
+)]
 impl Firestore for FakeFirestore {
     async fn get(&self, p: &DocPath) -> Result<Option<Document>, GatewayError> {
         self.record("get");

@@ -25,7 +25,7 @@ use crate::domain::{
 };
 use crate::port::GatewayError;
 
-pub fn value(v: &Value, t: &DbTarget) -> proto::Value {
+pub(super) fn value(v: &Value, t: &DbTarget) -> proto::Value {
     let value_type = match v {
         Value::Null => ValueType::NullValue(prost_types::NullValue::NullValue as i32),
         Value::Bool(b) => ValueType::BooleanValue(*b),
@@ -68,15 +68,15 @@ fn timestamp(ts: Timestamp) -> prost_types::Timestamp {
     }
 }
 
-pub fn update_time(u: &UpdateTime) -> prost_types::Timestamp {
+pub(super) fn update_time(u: &UpdateTime) -> prost_types::Timestamp {
     timestamp(u.timestamp())
 }
 
-pub fn doc_name(p: &DocPath, t: &DbTarget) -> String {
+pub(super) fn doc_name(p: &DocPath, t: &DbTarget) -> String {
     format!("{}/{p}", t.documents_root())
 }
 
-pub fn parent_name(parent: Option<&DocPath>, t: &DbTarget) -> String {
+pub(super) fn parent_name(parent: Option<&DocPath>, t: &DbTarget) -> String {
     parent.map_or_else(|| t.documents_root(), |p| doc_name(p, t))
 }
 
@@ -90,7 +90,7 @@ fn clamp(n: u32) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
 }
 
-pub fn structured_query(q: &Query, t: &DbTarget) -> (String, proto::StructuredQuery) {
+pub(super) fn structured_query(q: &Query, t: &DbTarget) -> (String, proto::StructuredQuery) {
     let (parent, from) = match &q.scope {
         Scope::Collection(c) => (
             parent_name(c.parent(), t),
@@ -185,11 +185,11 @@ fn field_operator(op: Op) -> field_filter::Operator {
     }
 }
 
-pub fn aggregation_alias(i: usize) -> String {
+pub(super) fn aggregation_alias(i: usize) -> String {
     format!("agg_{i}")
 }
 
-pub fn aggregation_query(
+pub(super) fn aggregation_query(
     q: &AggregateQuery,
     t: &DbTarget,
 ) -> (String, proto::StructuredAggregationQuery) {
@@ -237,7 +237,7 @@ fn guarded(guard: Guard, default: Option<ConditionType>) -> Option<proto::Precon
     }
 }
 
-pub fn write(w: &Write, t: &DbTarget) -> Result<proto::Write, GatewayError> {
+pub(super) fn write(w: &Write, t: &DbTarget) -> Result<proto::Write, GatewayError> {
     match w {
         Write::Set(s) => set(s, t),
         Write::Update(u) => update(u, t),
@@ -273,9 +273,12 @@ fn merge_mask(data: &Fields) -> Result<proto::DocumentMask, GatewayError> {
         data.iter()
             .flat_map(|(key, v)| {
                 let path: Vec<String> = prefix.iter().cloned().chain([key.clone()]).collect();
-                match v {
-                    Value::Map(m) if !m.is_empty() => leaves(&path, m),
-                    _ => vec![path],
+                if let Value::Map(m) = v
+                    && !m.is_empty()
+                {
+                    leaves(&path, m)
+                } else {
+                    vec![path]
                 }
             })
             .collect()
@@ -352,7 +355,6 @@ fn insert_nested(fields: &mut HashMap<String, proto::Value>, segments: &[String]
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use std::collections::BTreeMap;
 
@@ -382,7 +384,8 @@ mod tests {
     }
 
     fn precondition(w: &proto::Write) -> Option<ConditionType> {
-        w.current_document.and_then(|p| p.condition_type)
+        let p = w.current_document?;
+        p.condition_type
     }
 
     fn set(mode: SetMode, data: BTreeMap<String, Value>) -> Write {
@@ -408,7 +411,7 @@ mod tests {
         })
     }
 
-    fn field_path(s: &str) -> crate::domain::FieldPath {
+    fn field_path(s: &str) -> FieldPath {
         s.parse().unwrap()
     }
 
@@ -479,17 +482,14 @@ mod tests {
             panic!("expected a composite filter");
         };
         assert_eq!(c.filters.len(), 2);
-        assert_eq!(
-            c.op,
-            proto::structured_query::composite_filter::Operator::And as i32
-        );
+        assert_eq!(c.op, composite_filter::Operator::And as i32);
     }
 
     #[test]
     fn equality_with_null_and_nan_uses_unary_filters() {
         let unary = |op, value| {
             let mut q = query("users");
-            q.filters = vec![crate::domain::Filter::new(field_path("a"), op, value).unwrap()];
+            q.filters = vec![Filter::new(field_path("a"), op, value).unwrap()];
             let (_, sq) = structured_query(&q, &named());
             let Some(FilterType::UnaryFilter(u)) = sq.r#where.and_then(|w| w.filter_type) else {
                 panic!("expected a unary filter");

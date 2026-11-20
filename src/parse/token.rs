@@ -1,6 +1,4 @@
-use itertools::Itertools;
-
-use super::{ParseError, unquoted};
+use super::{ParseError, split_unquoted};
 use crate::domain::{DocPath, Timestamp, Value};
 
 /// Anything not recognised as a typed token is a string.
@@ -34,10 +32,10 @@ pub fn parse_token(s: &str) -> Result<Value, ParseError> {
 
 fn quoted(token: &str, body: &str) -> Result<String, ParseError> {
     let mut out = String::new();
-    let mut chars = body.char_indices();
-    while let Some((i, c)) = chars.next() {
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
         match c {
-            '"' if body[i + 1..].is_empty() => return Ok(out),
+            '"' if chars.as_str().is_empty() => return Ok(out),
             '"' => {
                 return Err(ParseError::new(
                     token,
@@ -45,8 +43,8 @@ fn quoted(token: &str, body: &str) -> Result<String, ParseError> {
                 ));
             }
             '\\' => match chars.next() {
-                Some((_, escaped @ ('"' | '\\'))) => out.push(escaped),
-                Some((_, other)) => {
+                Some(escaped @ ('"' | '\\')) => out.push(escaped),
+                Some(other) => {
                     return Err(ParseError::new(
                         token,
                         format!("invalid escape `\\{other}`; only \\\" and \\\\ are allowed"),
@@ -64,15 +62,9 @@ fn list(token: &str, inner: &str) -> Result<Vec<Value>, ParseError> {
     if inner.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let commas = unquoted(inner, '"')
-        .filter(|&(_, c)| c == ',')
-        .map(|(i, _)| i)
-        .collect_vec();
-    let starts = std::iter::once(0).chain(commas.iter().map(|i| i + 1));
-    let ends = commas.iter().copied().chain(std::iter::once(inner.len()));
-    starts
-        .zip(ends)
-        .map(|(start, end)| inner[start..end].trim())
+    split_unquoted(inner, '"', ',')
+        .into_iter()
+        .map(str::trim)
         .map(|element| match element {
             "" => Err(ParseError::new(token, "empty list element")),
             e if e.contains('"') && !e.starts_with('"') => Err(ParseError::new(
@@ -99,7 +91,7 @@ fn number(s: &str) -> Option<Result<Value, ParseError>> {
     let unsigned = s.strip_prefix('-').unwrap_or(s);
     if !unsigned.is_empty() && unsigned.chars().all(|c| c.is_ascii_digit()) {
         let canonical = unsigned == "0" || !unsigned.starts_with('0');
-        return canonical.then(|| s.parse::<i64>().map(Value::Int).map_err(|_| {
+        return canonical.then(|| s.parse::<i64>().map(Value::Int).map_err(|_overflow| {
             ParseError::new(
                 s,
                 "integer does not fit in 64 bits (quote it to use a string, or write it as a float like 1e20)",
@@ -122,7 +114,6 @@ fn number(s: &str) -> Option<Result<Value, ParseError>> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -178,11 +169,10 @@ mod tests {
 
     #[test]
     fn timestamps_keep_nanos() {
-        let shown = parse_token("ts:2026-01-05T10:00:00.123456789+09:00").map(|v| match v {
-            Value::Timestamp(t) => t.to_string(),
-            other => format!("{other:?}"),
-        });
-        assert_eq!(shown, Ok("2026-01-05T01:00:00.123456789Z".to_owned()));
+        let Ok(Value::Timestamp(t)) = parse_token("ts:2026-01-05T10:00:00.123456789+09:00") else {
+            panic!("not a timestamp")
+        };
+        assert_eq!(t.to_string(), "2026-01-05T01:00:00.123456789Z");
     }
 
     #[test]
@@ -215,13 +205,12 @@ mod tests {
     fn lists_are_typed_and_quote_aware() {
         assert_eq!(parse_token("[]"), Ok(Value::Array(vec![])));
         assert_eq!(parse_token("[ ]"), Ok(Value::Array(vec![])));
-        assert_eq!(
-            parse_token(r#"[a, "b, c" ,3,1.5, null,ts:2026-01-05T10:00:00Z]"#).map(|v| match v {
-                Value::Array(items) => items.len(),
-                _ => 0,
-            }),
-            Ok(6)
-        );
+        let Ok(Value::Array(items)) =
+            parse_token(r#"[a, "b, c" ,3,1.5, null,ts:2026-01-05T10:00:00Z]"#)
+        else {
+            panic!("not a list")
+        };
+        assert_eq!(items.len(), 6);
         assert_eq!(
             parse_token(r#"["x]", "y"]"#),
             Ok(Value::Array(vec!["x]".into(), "y".into()]))

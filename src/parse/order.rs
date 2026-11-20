@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use super::{ParseError, parse_field, unquoted};
+use super::{ParseError, parse_field, split_around, unquoted};
 use crate::domain::{Direction, OrderBy};
 
 impl FromStr for OrderBy {
@@ -8,12 +8,13 @@ impl FromStr for OrderBy {
 
     fn from_str(s: &str) -> Result<Self, ParseError> {
         let trimmed = s.trim();
-        let (field, direction) = match unquoted(trimmed, '`').filter(|&(_, c)| c == ':').last() {
+        let colon = unquoted(trimmed, '`')
+            .filter(|&(_, c)| c == ':')
+            .last()
+            .and_then(|(at, _)| split_around(trimmed, at));
+        let (field, direction) = match colon {
             None => (trimmed, Direction::Asc),
-            Some((colon, _)) => (
-                &trimmed[..colon],
-                direction(s, trimmed[colon + 1..].trim())?,
-            ),
+            Some((field, _, text)) => (field, direction(s, text.trim())?),
         };
         let field = parse_field(
             field,
@@ -38,7 +39,6 @@ fn direction(input: &str, text: &str) -> Result<Direction, ParseError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::domain::Direction;

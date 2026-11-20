@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use super::{ParseError, parse_field, parse_token, unquoted};
+use super::{ParseError, parse_field, parse_token, split_around, unquoted};
 use crate::domain::{Filter, Op};
 
 impl FromStr for Filter {
@@ -28,13 +28,13 @@ fn split(s: &str) -> Option<(&str, Op, &str)> {
     unquoted(s, '`')
         .filter(|&(_, c)| c.is_whitespace())
         .find_map(|(at, _)| {
-            let (word, value) = s[at..].trim_start().split_once(char::is_whitespace)?;
-            Some((&s[..at], Op::from_symbol(word)?, value.trim()))
+            let (field, _, rest) = split_around(s, at)?;
+            let (word, value) = rest.trim_start().split_once(char::is_whitespace)?;
+            Some((field, Op::from_symbol(word)?, value.trim()))
         })
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::domain::Value;

@@ -170,7 +170,7 @@ pub enum Value {
     Ref(DocPath),
     ForeignRef(DocResourceName),
     Geo(GeoPoint),
-    Array(Vec<Value>),
+    Array(Vec<Self>),
     Map(Fields),
 }
 
@@ -181,7 +181,6 @@ impl From<&str> for Value {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

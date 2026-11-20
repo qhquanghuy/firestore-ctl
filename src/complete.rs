@@ -1,16 +1,15 @@
 //! Best effort, must never get in the way: no candidates on any failure, nothing printed (stdout
-//! is the completion protocol), Firestore only read, and a failure is cached for [`FAILURE_TTL`] so
+//! is the completion protocol), Firestore only read, and a failure is cached for `FAILURE_TTL` so
 //! an offline user is slowed down once a minute at most.
 //!
 //! Built on `clap_complete`'s `unstable-dynamic` internals (hence the `~4.6` pin): the words after
 //! `--`, `_CLAP_COMPLETE_INDEX`, `_CLAP_IFS` and the text of the bash registration script (patched
-//! in [`bash`]). Re-check them, and the tests covering them, before moving the pin.
+//! in `bash`). Re-check them, and the tests covering them, before moving the pin.
 
 mod bash;
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
-use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::num::NonZeroU32;
@@ -18,10 +17,10 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use clap::{ArgMatches, CommandFactory};
+use clap::{ArgMatches, CommandFactory as _};
 use clap_complete::engine::{ArgValueCompleter, CompletionCandidate};
 use clap_complete::env::{Shells, Zsh};
-use itertools::Itertools;
+use itertools::Itertools as _;
 use serde_json::json;
 
 use crate::cli::{Cli, CompletionShell, ConnArgs};
@@ -29,8 +28,8 @@ use crate::domain::{
     AnyPath, CollectionId, DbTarget, Document, FieldPath, Fields, Limit, Op, Query, Scope, Value,
 };
 use crate::grpc;
-use crate::parse::unquoted;
-use crate::port::Firestore;
+use crate::parse::{split_around, unquoted};
+use crate::port::Firestore as _;
 
 /// Not the `clap_complete` default `COMPLETE`: a stray `COMPLETE` in someone's environment must
 /// not hijack the program.
@@ -117,9 +116,12 @@ fn nested_keys(prefix: &[String], fields: &Fields) -> Vec<Vec<String>> {
         .iter()
         .flat_map(|(key, value)| {
             let path = prefix.iter().cloned().chain([key.clone()]).collect_vec();
-            let below = match value {
-                Value::Map(inner) if path.len() < MAX_FIELD_DEPTH => nested_keys(&path, inner),
-                _ => Vec::new(),
+            let below = if let Value::Map(inner) = value
+                && path.len() < MAX_FIELD_DEPTH
+            {
+                nested_keys(&path, inner)
+            } else {
+                Vec::new()
             };
             std::iter::once(path).chain(below)
         })
@@ -244,9 +246,11 @@ fn lenient_command() -> clap::Command {
 
 fn parsed<T: FromStr>(matches: &ArgMatches, id: &str) -> Option<T> {
     let text = |m: &ArgMatches| m.try_get_one::<String>(id).ok().flatten().cloned();
-    text(matches)
-        .or_else(|| matches.subcommand().and_then(|(_, sub)| text(sub)))
-        .and_then(|text| text.parse().ok())
+    let text = text(matches).or_else(|| {
+        let (_, sub) = matches.subcommand()?;
+        text(sub)
+    })?;
+    text.parse().ok()
 }
 
 fn scope_of(matches: &ArgMatches) -> Option<Scope> {
@@ -349,14 +353,19 @@ fn field_position(kind: FieldKind, current: &str) -> FieldPosition<'_> {
         .map(|(i, _)| i)
         .last()
         .filter(|_| kind == FieldKind::Select);
-    let (kept, tail) = last_comma.map_or(("", current), |i| current.split_at(i + 1));
+    let (kept, tail) = last_comma
+        .and_then(|i| current.split_at_checked(i + 1))
+        .unwrap_or(("", current));
     if !unquoted(kept, '`').all(|(_, c)| c == ',' || !ends_field(c)) {
         return FieldPosition::Nothing;
     }
     match (kind, unquoted(tail, '`').find(|&(_, c)| ends_field(c))) {
         (_, None) => FieldPosition::Field { kept, typed: tail },
         (FieldKind::Where, Some((i @ 1.., c))) if c.is_whitespace() => {
-            let (field, rest) = (&tail[..i], tail[i..].trim_start());
+            let Some((field, _, rest)) = split_around(tail, i) else {
+                return FieldPosition::Nothing;
+            };
+            let rest = rest.trim_start();
             if rest.contains(char::is_whitespace) {
                 return FieldPosition::Nothing;
             }
@@ -370,7 +379,9 @@ fn field_position(kind: FieldKind, current: &str) -> FieldPosition<'_> {
             )
         }
         (FieldKind::OrderBy, Some((i @ 1.., ':'))) => {
-            let (field, rest) = (&tail[..i], &tail[i + 1..]);
+            let Some((field, _, rest)) = split_around(tail, i) else {
+                return FieldPosition::Nothing;
+            };
             if unquoted(rest, '`').any(|(_, c)| ends_field(c)) {
                 return FieldPosition::Nothing;
             }
@@ -495,8 +506,9 @@ impl Cache {
             Entry::Found(items) => json!({ "written": written, "items": items }),
             Entry::Failed => json!({ "written": written, "failed": true }),
         };
-        let _ = create_private_dir(&self.dir)
-            .and_then(|()| fs::write(self.file(name), body.to_string()));
+        create_private_dir(&self.dir)
+            .and_then(|()| fs::write(self.file(name), body.to_string()))
+            .ok();
     }
 }
 
@@ -520,14 +532,15 @@ fn cache_base(env: &impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
 /// Injective, so different texts never share a name, and free of `/`, `.`, `-` and `~`, which
 /// the names built from it use as separators.
 fn escape_name(text: &str) -> String {
-    text.bytes().fold(String::new(), |mut out, b| {
-        if b.is_ascii_alphanumeric() || b == b'_' {
-            out.push(char::from(b));
-        } else {
-            let _ = write!(out, "%{b:02X}");
-        }
-        out
-    })
+    text.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b == b'_' {
+                char::from(b).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
 }
 
 fn fields_cache_name(scope: &Scope) -> String {
@@ -562,7 +575,6 @@ fn cached(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use std::cell::Cell;
 
@@ -721,7 +733,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn cache_directories_are_private() {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
         let leaf = dir.path().join("firectl/p/d");
         cache_in(&leaf).write("x", at(1), &found(&[]));

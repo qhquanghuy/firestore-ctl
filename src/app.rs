@@ -131,12 +131,13 @@ pub async fn run<F: Firestore>(fs: &F, req: Authorized) -> Result<Output, AppErr
 }
 
 fn index_error(e: GatewayError, advice: impl FnOnce() -> Option<IndexAdvice>) -> AppError {
-    match e {
-        GatewayError::MissingIndex { console_url } => AppError::MissingIndex {
+    if let GatewayError::MissingIndex { console_url } = e {
+        AppError::MissingIndex {
             advice: advice(),
             console_url,
-        },
-        other => AppError::Gateway(other),
+        }
+    } else {
+        AppError::Gateway(e)
     }
 }
 

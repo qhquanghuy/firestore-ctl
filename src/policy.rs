@@ -3,7 +3,7 @@
 
 use std::str::FromStr;
 
-use itertools::Itertools;
+use itertools::Itertools as _;
 use thiserror::Error;
 
 use crate::domain::{DatabaseId, DbTarget, IdError, ProjectId};
@@ -113,7 +113,6 @@ impl WriteDenied {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

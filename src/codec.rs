@@ -33,8 +33,8 @@ fn fields_to_object(
 /// `set --overwrite` refuses input carrying this marker: it holds only some of the fields.
 #[must_use]
 pub fn mark_selected(document: serde_json::Value, select: &[FieldPath]) -> serde_json::Value {
-    match document {
-        serde_json::Value::Object(object) => serde_json::Value::Object(
+    if let serde_json::Value::Object(object) = document {
+        serde_json::Value::Object(
             object
                 .into_iter()
                 .chain([(
@@ -42,8 +42,9 @@ pub fn mark_selected(document: serde_json::Value, select: &[FieldPath]) -> serde
                     select.iter().map(ToString::to_string).collect(),
                 )])
                 .collect(),
-        ),
-        other => other,
+        )
+    } else {
+        document
     }
 }
 
@@ -67,7 +68,6 @@ fn double_json(f: f64) -> serde_json::Value {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{plain_json, typed_json};
     use crate::domain::document::Document;
@@ -82,7 +82,7 @@ mod tests {
         Document {
             path: "teams/t1".parse().unwrap(),
             update_time: "2026-11-20T00:00:00Z".parse().unwrap(),
-            data: [(key.to_string(), v)].into_iter().collect(),
+            data: [(key.to_owned(), v)].into_iter().collect(),
         }
     }
 
@@ -97,9 +97,13 @@ mod tests {
         typed_json::parse_input(j).map(|input| input.fields)
     }
 
+    fn parse_text(text: &str) -> serde_json::Value {
+        serde_json::from_str(text).unwrap()
+    }
+
     fn through_text(v: &Value) -> Result<Value, super::CodecError> {
         let text = typed_json::value_to_json(v).to_string();
-        typed_json::value_from_json(&serde_json::from_str(&text).unwrap())
+        typed_json::value_from_json(&parse_text(&text))
     }
 
     #[test]
@@ -118,7 +122,7 @@ mod tests {
             ("m", Value::Map(Fields::new())),
         ]
         .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
+        .map(|(k, v)| (k.to_owned(), v))
         .collect();
         let json = typed_json::value_to_json(&Value::Map(fields.clone()));
         assert_eq!(typed_json::value_from_json(&json), Ok(Value::Map(fields)));
@@ -427,10 +431,10 @@ mod tests {
     #[test]
     fn maps_with_a_single_dollar_key_roundtrip() {
         for key in ["$ts", "$foo", "$map", "$double"] {
-            let m = Value::Map([(key.to_string(), Value::Int(1))].into_iter().collect());
+            let m = Value::Map([(key.to_owned(), Value::Int(1))].into_iter().collect());
             assert_eq!(through_text(&m), Ok(m.clone()), "{key}");
             let nested = Value::Array(vec![Value::Map(
-                [(key.to_string(), m.clone())].into_iter().collect(),
+                [(key.to_owned(), m.clone())].into_iter().collect(),
             )]);
             assert_eq!(through_text(&nested), Ok(nested.clone()), "nested {key}");
         }
@@ -492,7 +496,7 @@ mod tests {
                 ("i", Value::Int(3)),
             ]
             .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
+            .map(|(k, v)| (k.to_owned(), v))
             .collect(),
         );
         assert_eq!(

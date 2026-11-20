@@ -1,4 +1,4 @@
-use itertools::Itertools;
+use itertools::Itertools as _;
 
 use super::field::FieldPath;
 use super::ids::{CollectionId, DbTarget};
@@ -111,7 +111,9 @@ pub fn required_index(q: &Query) -> Option<IndexAdvice> {
             field: f.field().clone(),
             mode: match f.op() {
                 Op::ArrayContains | Op::ArrayContainsAny => IndexMode::ArrayContains,
-                _ => IndexMode::Asc,
+                Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge | Op::In | Op::NotIn => {
+                    IndexMode::Asc
+                }
             },
         })
         .chain(orders)
@@ -216,7 +218,6 @@ fn shell_quote(arg: &str) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::domain::{DbTarget, Filter, OrderBy, Query, Scope};

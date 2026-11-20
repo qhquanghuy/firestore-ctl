@@ -1,7 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use itertools::Itertools;
+use itertools::Itertools as _;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Error)]
@@ -86,22 +86,23 @@ fn take_segment<'a>(rest: &'a str, input: &str) -> Result<(String, &'a str), Fie
         return take_quoted(quoted, input);
     }
     let end = rest.find(['.', '`']).unwrap_or(rest.len());
-    if rest[end..].starts_with('`') {
+    let (segment, tail) = rest.split_at_checked(end).unwrap_or((rest, ""));
+    if tail.starts_with('`') {
         Err(FieldPathError::Unexpected(input.to_owned()))
     } else {
-        Ok((rest[..end].to_owned(), &rest[end..]))
+        Ok((segment.to_owned(), tail))
     }
 }
 
 fn take_quoted<'a>(body: &'a str, input: &str) -> Result<(String, &'a str), FieldPathError> {
     let mut out = String::new();
-    let mut chars = body.char_indices();
-    while let Some((i, c)) = chars.next() {
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
         match c {
-            '`' => return Ok((out, &body[i + 1..])),
+            '`' => return Ok((out, chars.as_str())),
             '\\' => match chars.next() {
-                Some((_, escaped @ ('`' | '\\'))) => out.push(escaped),
-                Some((_, escape)) => {
+                Some(escaped @ ('`' | '\\')) => out.push(escaped),
+                Some(escape) => {
                     return Err(FieldPathError::InvalidEscape {
                         input: input.to_owned(),
                         escape,
@@ -138,7 +139,6 @@ impl FromStr for FieldPath {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

@@ -10,7 +10,7 @@ use std::path::Path;
 
 use clap_complete::engine::complete;
 use clap_complete::env::{Bash, EnvCompleter};
-use itertools::Itertools;
+use itertools::Itertools as _;
 
 const LINE_VAR: &str = "_FIRECTL_COMP_LINE";
 
@@ -147,7 +147,6 @@ impl EnvCompleter for FirectlBash {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use pretty_assertions::assert_eq;
 

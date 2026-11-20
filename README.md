@@ -13,7 +13,7 @@ Run `firectl --help` for the value syntax, field quoting, typed JSON tags and ex
 ```sh
 nix build                 # ./result/bin/firectl
 nix develop               # dev shell: rust toolchain, cargo-nextest, firebase-tools, jdk
-nix flake check           # fmt, clippy (-D warnings), tests
+nix flake check           # fmt, clippy (all warnings fatal), rustdoc, tests
 ```
 
 To put `firectl` on your PATH, add the flake to your NixOS or home-manager config:

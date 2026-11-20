@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use itertools::Itertools;
+use itertools::Itertools as _;
 use serde_json::Value as Json;
 
 use crate::app::{AppError, Output, Request};
@@ -17,7 +17,7 @@ use crate::domain::{
     FieldOp, FieldPath, Fields, Filter, Guard, IdError, Limit, NonEmptyVec, OrderBy, ProjectId,
     Query, Scope, SetDoc, SetMode, UpdateDoc, UpdateTime, Write, check_field_ops,
 };
-use crate::parse::{parse_field, unquoted};
+use crate::parse::{parse_field, split_unquoted};
 use crate::render::{Format, Layout, RenderOpts, Typing};
 
 const DEFAULT_LIMIT: NonZeroU32 = NonZeroU32::new(100).unwrap();
@@ -260,18 +260,9 @@ impl FromStr for FieldList {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, String> {
-        let commas = unquoted(s, '`')
-            .filter(|&(_, c)| c == ',')
-            .map(|(i, _)| i)
-            .collect_vec();
-        let bounds = std::iter::once(0)
-            .chain(commas.iter().map(|i| i + 1))
-            .zip(commas.iter().copied().chain(std::iter::once(s.len())));
-        bounds
-            .map(|(from, to)| {
-                let name = s[from..to].trim();
-                strict_field(name)
-            })
+        split_unquoted(s, '`', ',')
+            .into_iter()
+            .map(|name| strict_field(name.trim()))
             .try_collect()
             .map(Self)
     }
@@ -464,15 +455,15 @@ impl Cmd {
 
 #[must_use]
 pub fn truncation_note(default_limit_used: bool, output: &Output) -> Option<String> {
-    match output {
-        Output::Documents { docs, .. }
-            if default_limit_used && docs.len() == DEFAULT_LIMIT.get() as usize =>
-        {
-            Some(format!(
-                "note: showing the first {DEFAULT_LIMIT} documents; use --limit N or --all\n"
-            ))
-        }
-        _ => None,
+    if let Output::Documents { docs, .. } = output
+        && default_limit_used
+        && docs.len() == DEFAULT_LIMIT.get() as usize
+    {
+        Some(format!(
+            "note: showing the first {DEFAULT_LIMIT} documents; use --limit N or --all\n"
+        ))
+    } else {
+        None
     }
 }
 
@@ -661,7 +652,6 @@ impl Cli {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use std::io::{Cursor, empty};
 
@@ -672,28 +662,33 @@ mod tests {
         request_with_stdin(args, "")
     }
 
-    fn request_with_stdin(args: &[&str], stdin: &str) -> Result<Request, AppError> {
+    fn parsed(args: &[&str]) -> Cli {
         Cli::try_parse_from(
             ["firectl", "--project", "p"]
                 .into_iter()
                 .chain(args.iter().copied()),
         )
         .unwrap()
-        .into_request(Cursor::new(stdin.to_owned()))
+    }
+
+    fn request_with_stdin(args: &[&str], stdin: &str) -> Result<Request, AppError> {
+        parsed(args).into_request(Cursor::new(stdin.to_owned()))
     }
 
     fn query_of(args: &[&str]) -> Query {
-        match request(args).unwrap() {
-            Request::Query(q) => q,
-            other => panic!("not a query: {other:?}"),
-        }
+        let request = request(args).unwrap();
+        let Request::Query(q) = request else {
+            panic!("not a query: {request:?}")
+        };
+        q
     }
 
     fn set_of(args: &[&str]) -> SetDoc {
-        match request(args).unwrap() {
-            Request::Write(Write::Set(s)) => s,
-            other => panic!("not a set: {other:?}"),
-        }
+        let request = request(args).unwrap();
+        let Request::Write(Write::Set(s)) = request else {
+            panic!("not a set: {request:?}")
+        };
+        s
     }
 
     fn field(s: &str) -> FieldPath {

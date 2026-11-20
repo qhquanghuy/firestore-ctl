@@ -33,7 +33,7 @@ fn doc_path(name: &str, t: &DbTarget) -> Result<DocPath, GatewayError> {
         .map_err(|e| other(format!("`{name}` is not a document: {e}")))
 }
 
-pub fn document(d: proto::Document, t: &DbTarget) -> Result<Document, GatewayError> {
+pub(super) fn document(d: proto::Document, t: &DbTarget) -> Result<Document, GatewayError> {
     let path = doc_path(&d.name, t)?;
     let update_time = d
         .update_time
@@ -66,7 +66,7 @@ fn timestamp(ts: &prost_types::Timestamp) -> Result<Timestamp, GatewayError> {
         })
 }
 
-pub fn value(v: proto::Value, t: &DbTarget) -> Result<Value, GatewayError> {
+pub(super) fn value(v: proto::Value, t: &DbTarget) -> Result<Value, GatewayError> {
     match v.value_type {
         Some(ValueType::NullValue(_)) => Ok(Value::Null),
         Some(ValueType::BooleanValue(b)) => Ok(Value::Bool(b)),
@@ -106,13 +106,13 @@ fn reference(name: &str, t: &DbTarget) -> Result<Value, GatewayError> {
     }
 }
 
-pub fn update_time(t: &prost_types::Timestamp) -> Result<UpdateTime, GatewayError> {
+pub(super) fn update_time(t: &prost_types::Timestamp) -> Result<UpdateTime, GatewayError> {
     timestamp(t).map(UpdateTime::new)
 }
 
 /// Indexes the domain cannot express are skipped, never approximated; only the implicit trailing
 /// `__name__` field is dropped.
-pub fn index(c: &CollectionId, i: &admin::Index) -> Option<IndexInfo> {
+pub(super) fn index(c: &CollectionId, i: &admin::Index) -> Option<IndexInfo> {
     let scope = match ProtoScope::try_from(i.query_scope).ok()? {
         ProtoScope::Collection => QueryScope::Collection,
         ProtoScope::CollectionGroup => QueryScope::CollectionGroup,
@@ -149,14 +149,13 @@ fn index_field(f: &admin::index::IndexField) -> Option<IndexField> {
             ArrayConfig::Contains => IndexMode::ArrayContains,
             ArrayConfig::Unspecified => return None,
         },
-        _ => return None,
+        ValueMode::VectorConfig(_) | ValueMode::SearchConfig(_) => return None,
     };
     let field = f.field_path.parse::<FieldPath>().ok()?;
     Some(IndexField { field, mode })
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use std::collections::{BTreeMap, HashMap};
 

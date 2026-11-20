@@ -151,9 +151,10 @@ fn envelope_value<T>(
     let at = child("", key);
     top.get(key)
         .map(|v| {
-            v.as_str()
-                .ok_or_else(|| CodecError::new(&at, "must be a string"))
-                .and_then(|s| parse(s).map_err(|reason| CodecError::new(&at, reason)))
+            let s = v
+                .as_str()
+                .ok_or_else(|| CodecError::new(&at, "must be a string"))?;
+            parse(s).map_err(|reason| CodecError::new(&at, reason))
         })
         .transpose()
 }
@@ -165,12 +166,11 @@ fn select_paths(j: &Json) -> Result<Vec<FieldPath>, CodecError> {
         .enumerate()
         .map(|(i, p)| {
             let at = child("/_select", &i.to_string());
-            p.as_str()
-                .ok_or_else(|| CodecError::new(&at, "must be a string"))
-                .and_then(|s| {
-                    s.parse::<FieldPath>()
-                        .map_err(|e| CodecError::new(&at, e.to_string()))
-                })
+            let s = p
+                .as_str()
+                .ok_or_else(|| CodecError::new(&at, "must be a string"))?;
+            s.parse::<FieldPath>()
+                .map_err(|e| CodecError::new(&at, e.to_string()))
         })
         .collect()
 }
@@ -257,18 +257,23 @@ fn decode_tag(tag: &str, inner: &Json, at: &str) -> Result<Value, CodecError> {
             .ok_or_else(|| CodecError::new(at, format!("`{tag}` expects a string")))
     };
     match tag {
-        "$ts" => string().and_then(|s| {
+        "$ts" => {
+            let s = string()?;
             s.parse::<Timestamp>()
                 .map(Value::Timestamp)
                 .map_err(|e| CodecError::new(at, format!("invalid RFC 3339 timestamp: {e}")))
-        }),
-        "$ref" => string().and_then(|s| decode_ref(s, at)),
-        "$bytes" => string().and_then(|s| {
+        }
+        "$ref" => {
+            let s = string()?;
+            decode_ref(s, at)
+        }
+        "$bytes" => {
+            let s = string()?;
             STANDARD
                 .decode(s)
                 .map(Value::Bytes)
                 .map_err(|e| CodecError::new(at, format!("invalid base64: {e}")))
-        }),
+        }
         "$double" => decode_double(inner, at).map(Value::Double),
         "$geo" => decode_geo(inner, at),
         "$map" => inner
@@ -295,7 +300,7 @@ fn decode_double(inner: &Json, at: &str) -> Result<f64, CodecError> {
                 format!("`$double` string must be NaN, Infinity or -Infinity, got `{other}`"),
             )),
         },
-        _ => Err(CodecError::new(
+        Json::Null | Json::Bool(_) | Json::Array(_) | Json::Object(_) => Err(CodecError::new(
             at,
             "`$double` expects a number or a string",
         )),

@@ -52,6 +52,13 @@
               cargoClippyExtraArgs = "--all-targets -- -D warnings";
             }
           );
+          doc = craneLib.cargoDoc (
+            checkArgs
+            // {
+              cargoDocExtraArgs = "--no-deps --document-private-items";
+              RUSTDOCFLAGS = "-D warnings";
+            }
+          );
           fmt = craneLib.cargoFmt { inherit src; };
           nextest = craneLib.cargoNextest checkArgs;
         };

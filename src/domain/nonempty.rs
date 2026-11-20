@@ -32,7 +32,7 @@ impl<T> NonEmptyVec<T> {
     }
 
     #[must_use]
-    #[allow(clippy::len_without_is_empty)] // never empty by construction
+    #[expect(clippy::len_without_is_empty, reason = "never empty by construction")]
     pub fn len(&self) -> usize {
         1 + self.1.len()
     }
@@ -44,7 +44,6 @@ impl<T> NonEmptyVec<T> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

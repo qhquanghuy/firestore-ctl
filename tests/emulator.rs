@@ -1,10 +1,16 @@
 //! Each test uses its own `demo-` project, cleared first so the suite can be re-run, and refuses to
 //! run unless `FIRESTORE_EMULATOR_HOST` names a local address: these tests write, and must never
 //! reach a real project.
-#![allow(clippy::expect_used, clippy::panic)]
+
+#![expect(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code fails by panicking"
+)]
 
 use std::collections::BTreeSet;
-use std::io::{Read, Write};
+use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
 use std::time::Duration;
 

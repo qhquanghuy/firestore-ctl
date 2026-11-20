@@ -53,6 +53,28 @@ pub(crate) fn unquoted(s: &str, quote: char) -> impl Iterator<Item = (usize, cha
         .flatten()
 }
 
+/// Splits around the char at byte offset `at`, which must start a char: `None` otherwise.
+pub(crate) fn split_around(s: &str, at: usize) -> Option<(&str, char, &str)> {
+    let (before, rest) = s.split_at_checked(at)?;
+    let mut chars = rest.chars();
+    let c = chars.next()?;
+    Some((before, c, chars.as_str()))
+}
+
+pub(crate) fn split_unquoted(s: &str, quote: char, sep: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut rest = s;
+    while let Some((head, _, tail)) = unquoted(rest, quote)
+        .find(|&(_, c)| c == sep)
+        .and_then(|(at, _)| split_around(rest, at))
+    {
+        parts.push(head);
+        rest = tail;
+    }
+    parts.push(rest);
+    parts
+}
+
 const RESERVED_IN_FIELD: &str = "<>!=+-:";
 
 pub(crate) fn parse_field(text: &str, hint: &str) -> Result<FieldPath, String> {
