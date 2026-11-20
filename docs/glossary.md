@@ -36,7 +36,7 @@ Add a term here before introducing a new concept; rename code when a term change
 | typed JSON | Lossless JSON form of values; the default output. | codec/typed_json.rs |
 | plain JSON | Untagged, human-readable, lossy output (`--plain`). Cannot be written back. | codec/plain_json.rs |
 | tag | Single-key object marking a non-JSON type: `$ts $ref $double $bytes $geo $map`. | codec/typed_json.rs |
-| envelope / full document | `{"_path", "_updateTime", "data"}`. Recognised by `_path` or `_updateTime`. | `parse_input` |
+| envelope / full document | `{"_path", "_updateTime", "data"}`. Recognised by `_path`, `_updateTime`, or a marker. | `parse_input` |
 | bare data | A JSON object that is just the fields (no envelope). | `parse_input` |
 | marker | Top-level key flagging output that must not be written back as-is: `_plain`, `_select`. | codec |
 | round trip | `get` → edit → `set --overwrite --data -` with no type or precision loss. | — |

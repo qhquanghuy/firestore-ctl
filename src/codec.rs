@@ -323,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn markers_are_reserved_even_without_a_path_or_update_time() {
+    fn a_marker_alone_makes_a_full_document() {
         let stripped = typed_json::parse_input(&json!({
             "_plain": true,
             "_select": ["a"],
@@ -334,7 +334,19 @@ mod tests {
         assert!(envelope.plain);
         assert_eq!(envelope.select.map(|s| s.len()), Some(1));
         assert_eq!(envelope.path, None);
-        assert_eq!(stripped.fields.keys().collect::<Vec<_>>(), ["data"]);
+        assert_eq!(stripped.fields.keys().collect::<Vec<_>>(), ["a"]);
+        for marked in [
+            json!({"_plain": true, "a": 1}),
+            json!({"_select": ["a"], "a": 1}),
+        ] {
+            assert!(
+                typed_json::parse_input(&marked)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("inside `data`"),
+                "{marked}"
+            );
+        }
         assert_eq!(
             typed_json::parse_input(&json!({"a": 1})).unwrap().envelope,
             None

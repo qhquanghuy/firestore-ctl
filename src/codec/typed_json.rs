@@ -76,35 +76,26 @@ pub struct Envelope {
     pub select: Option<Vec<FieldPath>>,
 }
 
-/// A *full document* only if it has `_path` or `_updateTime` (then `data` is required and any other
-/// top-level key besides the `_plain`/`_select` markers is an error, not dropped); anything else
-/// is bare data, so `{"data": {...}}` alone is a field named `data`. The markers are reserved
-/// top-level keys: to store a field named so, use the full-document form and put it in `data`.
+/// A *full document* if it has `_path`, `_updateTime` or a marker (`_plain`/`_select`): then `data`
+/// is required and any other top-level key is an error, not dropped. firectl prints markers only
+/// inside the envelope, so a marker beside flat fields is malformed, not a field. Anything else is
+/// bare data, so `{"data": {...}}` alone is a field named `data`. To store a field named like a
+/// marker, use the full-document form and put it in `data`.
 pub fn parse_input(j: &Json) -> Result<Input, CodecError> {
     let top = j
         .as_object()
         .ok_or_else(|| CodecError::new("", "expected a JSON object"))?;
-    let is_full_document = ["_path", "_updateTime"]
+    let is_full_document = ["_path", "_updateTime", "_plain", "_select"]
         .iter()
         .any(|k| top.contains_key(*k));
-    let plain = top.contains_key("_plain");
-    let select = top.get("_select").map(select_paths).transpose()?;
-    if !is_full_document && !plain && select.is_none() {
+    if !is_full_document {
         return decode_fields(top, "").map(|fields| Input {
             fields,
             envelope: None,
         });
     }
-    let fields = if is_full_document {
-        full_document_fields(top)?
-    } else {
-        let data: Map<String, Json> = top
-            .iter()
-            .filter(|(k, _)| !matches!(k.as_str(), "_plain" | "_select"))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        decode_fields(&data, "")?
-    };
+    let select = top.get("_select").map(select_paths).transpose()?;
+    let fields = full_document_fields(top)?;
     let envelope = Envelope {
         path: envelope_value(top, "_path", |s| {
             s.parse::<DocPath>()
@@ -114,7 +105,7 @@ pub fn parse_input(j: &Json) -> Result<Input, CodecError> {
             s.parse::<UpdateTime>()
                 .map_err(|e| format!("invalid RFC 3339 timestamp: {e}"))
         })?,
-        plain,
+        plain: top.contains_key("_plain"),
         select,
     };
     Ok(Input {

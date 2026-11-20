@@ -58,7 +58,7 @@ Terms: see `glossary.md`.
 - **`$map` escapes a map whose single key starts with `$`.** Without it, such a map would be read back as a tag.
 - **Strict input.**
   - Unknown `$` tags, arrays directly inside arrays, and unknown top-level keys in a full document are errors.
-  - An envelope is recognised only by `_path` or `_updateTime`; `{"data": …}` alone is a field named `data`.
+  - An envelope is recognised only by `_path`, `_updateTime`, or a marker (`_plain`, `_select`); then fields must sit inside `data`, so `{"_select": ["a"], "a": 1}` is an error. `{"data": …}` alone is a field named `data`.
   - A full document's `_path` must match the target.
 - **Markers on output that would lose data if written back.**
   - `--plain` adds `_plain` and `set` refuses it.

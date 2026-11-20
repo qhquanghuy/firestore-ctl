@@ -68,9 +68,9 @@ Typed JSON (what `get`/`query` print and `set --data` reads):
   `set --merge` accepts them.
   `set --data` takes a bare object of fields or a whole document as printed by
   `get` (its _path must match the target); use --data @file.json or --data - (stdin).
-  A whole document is recognised by its _path or _updateTime key; any other object is
-  bare field data (so {"data": {...}} alone is a field named data). Top-level "_plain"
-  and "_select" keys are always output markers, never fields.
+  A whole document is recognised by a _path, _updateTime, _plain or _select key, and then
+  its fields must sit inside "data" (any other top-level key is an error). Any other
+  object is bare field data (so {"data": {...}} alone is a field named data).
 
 Concurrency:
   --if-unchanged-since takes the _updateTime printed by `get`, verbatim (nanoseconds
@@ -1020,104 +1020,163 @@ mod tests {
         assert!(matches!(cli.into_request(empty()), Err(AppError::Input(_))));
     }
 
-    const PRINTED: &str =
-        r#"{"_path":"users/u1","_updateTime":"2026-01-05T10:00:00.123456789Z","data":{"a":1}}"#;
+    const T: &str = "2026-01-05T10:00:00.123456789Z";
 
-    fn printed_with(extra: &str) -> String {
-        format!(
-            r#"{{"_path":"users/u1","_updateTime":"2026-01-05T10:00:00.123456789Z",{extra},"data":{{"a":1}}}}"#
-        )
+    #[derive(Clone, Copy)]
+    enum Stored {
+        FieldA,
+        FieldData,
+    }
+
+    #[derive(Clone, Copy)]
+    enum Cell {
+        Writes(SetMode, Stored),
+        Rejects(&'static str),
+    }
+
+    // Columns: create, --overwrite, --merge, --overwrite --force, --merge --force.
+    const MODES: [&[&str]; 5] = [
+        &[],
+        &["--overwrite"],
+        &["--merge"],
+        &["--overwrite", "--force"],
+        &["--merge", "--force"],
+    ];
+
+    fn writes_with(stored: Stored, implicit: Guard) -> [Cell; 5] {
+        [
+            Cell::Writes(SetMode::Create, stored),
+            Cell::Writes(SetMode::Overwrite(implicit), stored),
+            Cell::Writes(SetMode::Merge(implicit), stored),
+            Cell::Writes(SetMode::Overwrite(Guard::None), stored),
+            Cell::Writes(SetMode::Merge(Guard::None), stored),
+        ]
+    }
+
+    fn only_merge_writes(guard: Guard) -> [Cell; 5] {
+        let no = Cell::Rejects("--merge");
+        [
+            no,
+            no,
+            Cell::Writes(SetMode::Merge(guard), Stored::FieldA),
+            no,
+            Cell::Writes(SetMode::Merge(Guard::None), Stored::FieldA),
+        ]
     }
 
     #[test]
-    fn data_alone_is_a_field_named_data_not_an_envelope() {
-        let data = set_of(&["set", "users/u1", "--data", r#"{"data":{"a":1}}"#]).data;
-        assert_eq!(data.keys().collect_vec(), ["data"]);
-    }
-
-    #[test]
-    fn plain_output_cannot_be_written_back() {
-        let plain = printed_with(r#""_plain":true"#);
-        for mode in [&[][..], &["--overwrite"], &["--merge"]] {
-            let args = [&["set", "users/u1", "--data", &plain][..], mode].concat();
-            assert_eq!(
-                request(&args),
-                Err(AppError::Input(
-                    "plain output cannot be written back; use typed output (omit --plain)".into()
-                )),
-                "{mode:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn markers_count_even_when_path_and_update_time_were_stripped() {
-        for data in [
-            r#"{"_plain":true,"data":{"a":1}}"#,
-            r#"{"_plain":true,"a":1}"#,
-        ] {
-            assert!(
-                matches!(request(&["set", "users/u1", "--data", data, "--overwrite"]),
-                    Err(AppError::Input(m)) if m.contains("plain output")),
-                "{data}"
-            );
-        }
-        let projection = r#"{"_select":["a"],"a":1}"#;
-        assert!(matches!(
-            request(&["set", "users/u1", "--data", projection, "--overwrite"]),
-            Err(AppError::Input(m)) if m.contains("--merge")
-        ));
-        let merged = set_of(&["set", "users/u1", "--data", projection, "--merge"]);
-        assert_eq!(merged.data.keys().collect_vec(), ["a"]);
-    }
-
-    #[test]
-    fn a_select_projection_may_only_be_merged() {
-        let projection = printed_with(r#""_select":["a"]"#);
-        for mode in [&[][..], &["--overwrite"]] {
-            let args = [&["set", "users/u1", "--data", &projection][..], mode].concat();
-            assert!(
-                matches!(request(&args), Err(AppError::Input(m))
-                    if m.contains("--select") && m.contains("--merge")),
-                "{mode:?}"
-            );
-        }
-        let merged = set_of(&["set", "users/u1", "--data", &projection, "--merge"]);
-        assert_eq!(merged.data.keys().collect_vec(), ["a"]);
-        assert!(matches!(merged.mode, SetMode::Merge(_)));
-    }
-
-    #[test]
-    fn a_printed_document_guards_its_own_write_back() {
-        let t: UpdateTime = "2026-01-05T10:00:00.123456789Z".parse().unwrap();
-        let mode = |extra: &[&str]| {
-            set_of(&[&["set", "users/u1", "--data", PRINTED][..], extra].concat()).mode
-        };
+    fn set_data_shape_and_mode_decide_what_is_written() {
+        let t: UpdateTime = T.parse().unwrap();
         let guarded = Guard::UnchangedSince(t);
-        assert_eq!(mode(&["--overwrite"]), SetMode::Overwrite(guarded));
-        assert_eq!(mode(&["--merge"]), SetMode::Merge(guarded));
-        assert_eq!(
-            mode(&["--overwrite", "--force"]),
-            SetMode::Overwrite(Guard::None)
-        );
-        assert_eq!(mode(&["--merge", "--force"]), SetMode::Merge(Guard::None));
-        let other: UpdateTime = "2026-02-01T00:00:00Z".parse().unwrap();
-        assert_eq!(
-            mode(&[
-                "--overwrite",
-                "--if-unchanged-since",
-                "2026-02-01T00:00:00Z"
-            ]),
-            SetMode::Overwrite(Guard::UnchangedSince(other))
-        );
-        assert_eq!(mode(&[]), SetMode::Create);
+        let full = |extra: &str| {
+            format!(r#"{{"_path":"users/u1","_updateTime":"{T}",{extra}"data":{{"a":1}}}}"#)
+        };
+        let a: Fields = [("a".to_owned(), Value::Int(1))].into();
+        let data: Fields = [("data".to_owned(), Value::Map(a))].into();
+        let stored = |s: Stored| match s {
+            Stored::FieldA => [("a".to_owned(), Value::Int(1))].into(),
+            Stored::FieldData => data.clone(),
+        };
+        let reject = |msg| [Cell::Rejects(msg); 5];
+        let shapes = [
+            (
+                "A",
+                r#"{"a":1}"#.to_owned(),
+                writes_with(Stored::FieldA, Guard::None),
+            ),
+            (
+                "B",
+                r#"{"data":{"a":1}}"#.to_owned(),
+                writes_with(Stored::FieldData, Guard::None),
+            ),
+            ("C", full(""), writes_with(Stored::FieldA, guarded)),
+            (
+                "D",
+                r#"{"_path":"users/u1","data":{"a":1}}"#.to_owned(),
+                writes_with(Stored::FieldA, Guard::None),
+            ),
+            (
+                "E",
+                format!(r#"{{"_updateTime":"{T}","data":{{"a":1}}}}"#),
+                writes_with(Stored::FieldA, guarded),
+            ),
+            ("F", full(r#""_plain":true,"#), reject("plain output")),
+            ("G", full(r#""_select":["a"],"#), only_merge_writes(guarded)),
+            (
+                "H",
+                r#"{"_select":["a"],"data":{"a":1}}"#.to_owned(),
+                only_merge_writes(Guard::None),
+            ),
+            (
+                "I",
+                r#"{"_plain":true,"data":{"a":1}}"#.to_owned(),
+                reject("plain output"),
+            ),
+            (
+                "J",
+                r#"{"_select":["a"],"a":1}"#.to_owned(),
+                reject("inside `data`"),
+            ),
+            (
+                "K",
+                r#"{"_plain":true,"a":1}"#.to_owned(),
+                reject("inside `data`"),
+            ),
+            (
+                "L",
+                full("").replace("users/u1", "users/u2"),
+                reject("does not match"),
+            ),
+            ("M", full(r#""x":1,"#), reject("inside `data`")),
+            (
+                "N",
+                r#"{"_path":"users/u1"}"#.to_owned(),
+                reject("`data` object"),
+            ),
+            (
+                "O",
+                r#"{"_select":["a"],"b":1,"data":{"a":1}}"#.to_owned(),
+                reject("inside `data`"),
+            ),
+        ];
+        for (id, json, row) in shapes {
+            for (mode, cell) in MODES.iter().zip(row) {
+                let args = [&["set", "users/u1", "--data", &json][..], mode].concat();
+                let got = request(&args);
+                match cell {
+                    Cell::Writes(mode_written, fields) => assert_eq!(
+                        got,
+                        Ok(Request::Write(Write::Set(SetDoc {
+                            path: "users/u1".parse().unwrap(),
+                            data: stored(fields),
+                            mode: mode_written,
+                        }))),
+                        "shape {id} with {mode:?}"
+                    ),
+                    Cell::Rejects(why) => assert!(
+                        matches!(&got, Err(AppError::Input(m)) if m.contains(why)),
+                        "shape {id} with {mode:?} gave {got:?}, wanted exit 2 mentioning {why}"
+                    ),
+                }
+            }
+        }
     }
 
     #[test]
-    fn bare_data_has_no_implicit_guard() {
-        let bare = |extra: &str| set_of(&["set", "users/u1", "--data", r#"{"a":1}"#, extra]).mode;
-        assert_eq!(bare("--overwrite"), SetMode::Overwrite(Guard::None));
-        assert_eq!(bare("--merge"), SetMode::Merge(Guard::None));
+    fn an_explicit_guard_replaces_the_one_a_printed_document_carries() {
+        let other: UpdateTime = "2026-02-01T00:00:00Z".parse().unwrap();
+        let printed = format!(r#"{{"_path":"users/u1","_updateTime":"{T}","data":{{"a":1}}}}"#);
+        let mode = set_of(&[
+            "set",
+            "users/u1",
+            "--data",
+            &printed,
+            "--overwrite",
+            "--if-unchanged-since",
+            "2026-02-01T00:00:00Z",
+        ])
+        .mode;
+        assert_eq!(mode, SetMode::Overwrite(Guard::UnchangedSince(other)));
     }
 
     #[test]
