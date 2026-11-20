@@ -24,7 +24,7 @@ pub fn exit_code_value(e: &AppError) -> u8 {
         AppError::Gateway(GatewayError::PreconditionFailed(_)) => 5,
         AppError::WritesDisabled(_) => 6,
         AppError::MissingIndex { .. } | AppError::Gateway(GatewayError::MissingIndex { .. }) => 7,
-        AppError::Gateway(GatewayError::Auth(_)) => 8,
+        AppError::Gateway(GatewayError::Auth(_) | GatewayError::PermissionDenied(_)) => 8,
         AppError::Gateway(GatewayError::Other(_)) | AppError::Policy(_) => 1,
     }
 }

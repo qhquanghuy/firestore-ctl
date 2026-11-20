@@ -1,5 +1,6 @@
 //! Firestore protos to domain types. Pure; anything this program cannot represent
-//! (another database's reference, pipeline-only values) is an error, never a guess.
+//! (another database's reference, pipeline-only values) is an error, never a guess. The
+//! one exception is [`index`]: listing indexes skips those the domain cannot express.
 
 use std::collections::HashMap;
 
@@ -115,21 +116,22 @@ pub fn update_time(t: &prost_types::Timestamp) -> Result<UpdateTime, GatewayErro
     timestamp(t).map(UpdateTime::new)
 }
 
-/// An existing composite index of collection group `c`, or `None` if it uses features
-/// the domain cannot express (vector or search fields, recursive scope).
-/// The implicit trailing `__name__` field is dropped.
+/// An existing composite index of collection group `c`.
+///
+/// Indexes the domain cannot express are skipped (`None`), never approximated: vector or
+/// search fields, recursive scope, an unknown field mode, a field path that does not
+/// parse. Only the implicit trailing `__name__` field is dropped.
 pub fn index(c: &CollectionId, i: &admin::Index) -> Option<IndexInfo> {
     let scope = match ProtoScope::try_from(i.query_scope).ok()? {
         ProtoScope::Collection => QueryScope::Collection,
         ProtoScope::CollectionGroup => QueryScope::CollectionGroup,
         ProtoScope::Unspecified | ProtoScope::CollectionRecursive => return None,
     };
-    let fields: Vec<IndexField> = i
-        .fields
-        .iter()
-        .filter(|f| f.field_path != "__name__")
-        .map(index_field)
-        .collect::<Option<_>>()?;
+    let explicit = match i.fields.split_last() {
+        Some((last, rest)) if last.field_path == "__name__" => rest,
+        _ => &i.fields[..],
+    };
+    let fields: Vec<IndexField> = explicit.iter().map(index_field).collect::<Option<_>>()?;
     Some(IndexInfo {
         spec: IndexSpec {
             collection_group: c.clone(),
@@ -158,11 +160,7 @@ fn index_field(f: &admin::index::IndexField) -> Option<IndexField> {
         },
         _ => return None,
     };
-    let field = f
-        .field_path
-        .parse::<FieldPath>()
-        .or_else(|_| FieldPath::from_segments([f.field_path.clone()]))
-        .ok()?;
+    let field = f.field_path.parse::<FieldPath>().ok()?;
     Some(IndexField { field, mode })
 }
 
@@ -395,5 +393,49 @@ mod tests {
             State::Ready,
         );
         assert_eq!(index(&c, &no_mode), None);
+    }
+
+    #[test]
+    fn index_with_an_unparsable_field_path_is_skipped_not_repaired() {
+        let c: CollectionId = "orders".parse().unwrap();
+        let bad = proto_index(
+            vec![
+                index_field("ok", ValueMode::Order(Order::Ascending as i32)),
+                index_field("a`b", ValueMode::Order(Order::Ascending as i32)),
+            ],
+            ProtoScope::Collection,
+            State::Ready,
+        );
+        assert_eq!(index(&c, &bad), None);
+    }
+
+    #[test]
+    fn only_a_trailing_name_field_is_dropped() {
+        let c: CollectionId = "orders".parse().unwrap();
+        let asc = || ValueMode::Order(Order::Ascending as i32);
+        let info = |fields| {
+            index(
+                &c,
+                &proto_index(fields, ProtoScope::Collection, State::Ready),
+            )
+        };
+        let paths = |i: IndexInfo| {
+            i.spec
+                .fields
+                .iter()
+                .map(|f| f.field.to_string())
+                .collect::<Vec<_>>()
+        };
+        let middle = info(vec![
+            index_field("a", asc()),
+            index_field("__name__", asc()),
+            index_field("b", asc()),
+        ]);
+        assert_eq!(paths(middle.unwrap()), ["a", "__name__", "b"]);
+        let trailing = info(vec![
+            index_field("a", asc()),
+            index_field("__name__", asc()),
+        ]);
+        assert_eq!(paths(trailing.unwrap()), ["a"]);
     }
 }

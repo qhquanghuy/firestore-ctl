@@ -18,6 +18,7 @@ use gcloud_sdk::google::firestore::v1::structured_query::{
 };
 use gcloud_sdk::google::firestore::v1::value::ValueType;
 use gcloud_sdk::prost_types;
+use itertools::Itertools;
 
 use crate::domain::{
     AggregateQuery, Aggregation, DbTarget, Direction, DocPath, FieldOp, FieldPath, Fields, Filter,
@@ -253,7 +254,7 @@ fn guarded(guard: Guard, default: Option<ConditionType>) -> Option<proto::Precon
 pub fn write(w: &Write, t: &DbTarget) -> Result<proto::Write, GatewayError> {
     match w {
         Write::Set(s) => set(s, t),
-        Write::Update(u) => Ok(update(u, t)),
+        Write::Update(u) => update(u, t),
         Write::Delete(d) => Ok(proto::Write {
             operation: Some(proto::write::Operation::Delete(doc_name(&d.path, t))),
             current_document: guarded(d.guard, Some(ConditionType::Exists(true))),
@@ -305,7 +306,8 @@ fn merge_mask(data: &Fields) -> Result<proto::DocumentMask, GatewayError> {
         .map(|field_paths| proto::DocumentMask { field_paths })
 }
 
-fn update(u: &UpdateDoc, t: &DbTarget) -> proto::Write {
+fn update(u: &UpdateDoc, t: &DbTarget) -> Result<proto::Write, GatewayError> {
+    reject_overlaps(u)?;
     let sets = u.ops.iter().filter_map(|op| match op {
         FieldOp::Set(path, v) => Some((path, value(v, t))),
         FieldOp::ArrayUnion(..) | FieldOp::ArrayRemove(..) => None,
@@ -318,7 +320,7 @@ fn update(u: &UpdateDoc, t: &DbTarget) -> proto::Write {
             (mask, nested)
         },
     );
-    proto::Write {
+    Ok(proto::Write {
         operation: Some(proto::write::Operation::Update(proto::Document {
             name: doc_name(&u.path, t),
             fields: nested,
@@ -331,7 +333,34 @@ fn update(u: &UpdateDoc, t: &DbTarget) -> proto::Write {
             .filter_map(|op| array_transform(op, t))
             .collect(),
         current_document: guarded(u.guard, Some(ConditionType::Exists(true))),
+    })
+}
+
+fn op_path(op: &FieldOp) -> &FieldPath {
+    match op {
+        FieldOp::Set(p, _) | FieldOp::ArrayUnion(p, _) | FieldOp::ArrayRemove(p, _) => p,
     }
+}
+
+/// Firestore rejects an update that touches a field twice or both a map and something
+/// inside it (`a` with `a.b`), including a set plus an array change of one field. Say
+/// so before sending, naming the two paths.
+fn reject_overlaps(u: &UpdateDoc) -> Result<(), GatewayError> {
+    let overlaps = |a: &FieldPath, b: &FieldPath| {
+        a.segments().starts_with(b.segments()) || b.segments().starts_with(a.segments())
+    };
+    u.ops
+        .iter()
+        .map(op_path)
+        .collect_vec()
+        .into_iter()
+        .array_combinations::<2>()
+        .find(|[a, b]| overlaps(a, b))
+        .map_or(Ok(()), |[a, b]| {
+            Err(GatewayError::Other(format!(
+                "conflicting changes to `{a}` and `{b}`: each field can be changed once, and not together with a field inside it"
+            )))
+        })
 }
 
 fn array_transform(op: &FieldOp, t: &DbTarget) -> Option<FieldTransform> {
@@ -769,5 +798,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(mask(&w), Some(Vec::new()));
+    }
+
+    #[test]
+    fn overlapping_update_paths_are_rejected_before_sending() {
+        let set = |p: &str| FieldOp::Set(field_path(p), Value::Int(1));
+        let union = |p: &str| FieldOp::ArrayUnion(field_path(p), vec![Value::Int(1)]);
+        let remove = |p: &str| FieldOp::ArrayRemove(field_path(p), vec![Value::Int(1)]);
+        let conflicts = [
+            vec![set("a"), set("a.b")],
+            vec![set("a.b"), set("a")],
+            vec![set("a"), set("a")],
+            vec![set("tags"), union("tags")],
+            vec![union("tags"), remove("tags")],
+            vec![union("a.b"), set("a")],
+        ];
+        for ops in conflicts {
+            let r = write(&update(ops.clone(), Guard::None), &named());
+            assert!(
+                matches!(&r, Err(GatewayError::Other(m)) if m.contains("conflicting")),
+                "{ops:?}: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sibling_and_similarly_named_update_paths_do_not_conflict() {
+        let set = |p: &str| FieldOp::Set(field_path(p), Value::Int(1));
+        let ops = vec![set("a.b"), set("a.c"), set("ab"), set("`a.b`")];
+        assert!(write(&update(ops, Guard::None), &named()).is_ok());
     }
 }

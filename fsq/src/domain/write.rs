@@ -25,6 +25,17 @@ pub enum Guard {
     UnchangedSince(UpdateTime),
 }
 
+impl Guard {
+    /// The update time the document must still have, if this guard demands one.
+    #[must_use]
+    pub fn unchanged_since(&self) -> Option<&UpdateTime> {
+        match self {
+            Self::None => None,
+            Self::UnchangedSince(t) => Some(t),
+        }
+    }
+}
+
 /// How a whole-document write treats an existing document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetMode {
@@ -89,6 +100,20 @@ impl Write {
             Self::Delete(w) => &w.path,
         }
     }
+
+    /// The update time this write requires the document to still have, if it is
+    /// guarded. `Create` has no guard (it requires the document to be absent).
+    #[must_use]
+    pub fn guard(&self) -> Option<&UpdateTime> {
+        match self {
+            Self::Set(SetDoc { mode, .. }) => match mode {
+                SetMode::Create => None,
+                SetMode::Overwrite(g) | SetMode::Merge(g) => g.unchanged_since(),
+            },
+            Self::Update(w) => w.guard.unchanged_since(),
+            Self::Delete(w) => w.guard.unchanged_since(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -109,5 +134,43 @@ mod tests {
             mode: SetMode::Create,
         });
         assert_eq!((delete.path(), set.path()), (&path, &path));
+    }
+
+    #[test]
+    fn guard_is_the_unchanged_since_time_of_any_write_kind() {
+        let path: DocPath = "users/u1".parse().unwrap();
+        let t: UpdateTime = "2026-01-05T10:00:00.5Z".parse().unwrap();
+        let g = Guard::UnchangedSince(t);
+        let set = |mode| {
+            Write::Set(SetDoc {
+                path: path.clone(),
+                data: Fields::new(),
+                mode,
+            })
+        };
+        let writes = [
+            set(SetMode::Overwrite(g)),
+            set(SetMode::Merge(g)),
+            Write::Delete(DeleteDoc {
+                path: path.clone(),
+                guard: g,
+            }),
+            Write::Update(UpdateDoc {
+                path: path.clone(),
+                ops: NonEmptyVec::try_from(vec![FieldOp::Set("a".parse().unwrap(), Value::Null)])
+                    .unwrap(),
+                guard: g,
+            }),
+        ];
+        assert!(writes.iter().all(|w| w.guard() == Some(&t)));
+        let unguarded = [
+            set(SetMode::Create),
+            set(SetMode::Overwrite(Guard::None)),
+            Write::Delete(DeleteDoc {
+                path,
+                guard: Guard::None,
+            }),
+        ];
+        assert!(unguarded.iter().all(|w| w.guard().is_none()));
     }
 }

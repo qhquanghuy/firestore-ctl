@@ -306,6 +306,7 @@ fn denied_write_does_not_read_stdin() {
     use std::time::{Duration, Instant};
 
     let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("fsq"))
+        .env("FIRESTORE_EMULATOR_HOST", "127.0.0.1:1")
         .env_remove("FSQ_WRITABLE")
         .args([
             "--project",

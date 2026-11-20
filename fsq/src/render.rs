@@ -109,7 +109,7 @@ pub fn render(o: &Output, opts: &RenderOpts) -> String {
 
 /// Text for stderr; ends with `\n` like [`render`]. The error's message once, plus
 /// what to do about it: for a missing index the `gcloud` command and the console link
-/// (each labelled, on its own line); for an authentication failure the login command.
+/// (each labelled, on its own line); for an authentication failure the login command, for a permission failure a pointer to IAM.
 #[must_use]
 pub fn render_error(e: &AppError, t: &DbTarget) -> String {
     let message = e.to_string();
@@ -125,6 +125,13 @@ pub fn render_error(e: &AppError, t: &DbTarget) -> String {
         AppError::Gateway(GatewayError::MissingIndex { console_url }) => {
             index_help(message, None, console_url.as_ref())
         }
+        AppError::Gateway(GatewayError::PermissionDenied(_)) => vec![
+            message,
+            format!(
+                "the signed-in account lacks Firestore permission on {}/{} (check its IAM roles on the project)",
+                t.project, t.database
+            ),
+        ],
         AppError::Gateway(GatewayError::Auth(_)) => vec![
             message,
             "run: gcloud auth application-default login".to_owned(),
@@ -784,6 +791,15 @@ mod tests {
             out.contains("gcloud firestore indexes fields update age --project=p --database=d"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn permission_denied_points_at_iam_not_login() {
+        let e = AppError::Gateway(GatewayError::PermissionDenied("no access".to_owned()));
+        let out = render_error(&e, &target());
+        assert!(out.contains("permission denied: no access"), "{out}");
+        assert!(out.contains("lacks Firestore permission on p/d"), "{out}");
+        assert!(!out.contains("application-default login"), "{out}");
     }
 
     #[test]

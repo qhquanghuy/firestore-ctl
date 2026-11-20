@@ -95,6 +95,9 @@ pub enum GatewayError {
     /// Missing, expired or rejected credentials.
     #[error("authentication failed: {0}")]
     Auth(String),
+    /// Valid credentials that lack Firestore permission on the project or database.
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
     /// Any other failure (network, quota, malformed request, ...).
     #[error("{0}")]
     Other(String),
