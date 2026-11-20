@@ -22,6 +22,7 @@ Flow in `main.rs`: parse args, `app::authorize` (policy gate), `grpc::connect`, 
 ## Rules the tooling cannot check
 
 - Speak and name things in the terms of `docs/glossary.md`. Add a term there before introducing a new concept.
+- Read `docs/decisions.md` before changing behaviour. Record a new or reversed decision there (edit, don't contradict).
 
 - A trait only where there are several impls. No new trait or abstraction for one impl.
 - Newtypes and parse, don't validate: make illegal states unrepresentable.
