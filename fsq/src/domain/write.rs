@@ -1,5 +1,8 @@
 //! Write building blocks: field changes from `--set` flags and whole-document writes.
 
+use itertools::Itertools;
+use thiserror::Error;
+
 use super::field::FieldPath;
 use super::nonempty::NonEmptyVec;
 use super::path::DocPath;
@@ -14,6 +17,55 @@ pub enum FieldOp {
     ArrayUnion(FieldPath, Vec<Value>),
     /// Remove every occurrence of the elements from the array field.
     ArrayRemove(FieldPath, Vec<Value>),
+}
+
+/// Why a list of field changes cannot be applied as one update.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum WriteError {
+    /// Two changes touch the same field, or one touches a field inside the other.
+    #[error(
+        "conflicting changes to `{first}` and `{second}`: each field can be changed once, and not together with a field inside it"
+    )]
+    Overlap {
+        /// The earlier of the two paths.
+        first: FieldPath,
+        /// The later of the two paths.
+        second: FieldPath,
+    },
+}
+
+impl FieldOp {
+    /// The field this change applies to.
+    #[must_use]
+    pub fn path(&self) -> &FieldPath {
+        match self {
+            Self::Set(p, _) | Self::ArrayUnion(p, _) | Self::ArrayRemove(p, _) => p,
+        }
+    }
+}
+
+/// Checks that `ops` can be sent as one update: Firestore rejects a field changed twice
+/// (a set and an array change included) and a map changed together with a field inside
+/// it (`a` with `a.b`).
+///
+/// # Errors
+/// [`WriteError::Overlap`] naming the first conflicting pair.
+pub fn check_field_ops(ops: &NonEmptyVec<FieldOp>) -> Result<(), WriteError> {
+    let overlaps = |a: &FieldPath, b: &FieldPath| {
+        a.segments().starts_with(b.segments()) || b.segments().starts_with(a.segments())
+    };
+    ops.iter()
+        .map(FieldOp::path)
+        .collect_vec()
+        .into_iter()
+        .array_combinations::<2>()
+        .find(|[a, b]| overlaps(a, b))
+        .map_or(Ok(()), |[a, b]| {
+            Err(WriteError::Overlap {
+                first: a.clone(),
+                second: b.clone(),
+            })
+        })
 }
 
 /// A precondition on the document's current state.
@@ -172,5 +224,54 @@ mod tests {
             }),
         ];
         assert!(unguarded.iter().all(|w| w.guard().is_none()));
+    }
+
+    fn ops(ops: Vec<FieldOp>) -> NonEmptyVec<FieldOp> {
+        NonEmptyVec::try_from(ops).unwrap()
+    }
+
+    #[test]
+    fn field_ops_that_overlap_are_rejected() {
+        let path = |s: &str| s.parse::<FieldPath>().unwrap();
+        let set = |p: &str| FieldOp::Set(path(p), Value::Int(1));
+        let union = |p: &str| FieldOp::ArrayUnion(path(p), vec![Value::Int(1)]);
+        let remove = |p: &str| FieldOp::ArrayRemove(path(p), vec![Value::Int(1)]);
+        for conflict in [
+            vec![set("a"), set("a.b")],
+            vec![set("a.b"), set("a")],
+            vec![set("a"), set("a")],
+            vec![set("tags"), union("tags")],
+            vec![union("tags"), remove("tags")],
+        ] {
+            assert!(
+                matches!(
+                    check_field_ops(&ops(conflict.clone())),
+                    Err(WriteError::Overlap { .. })
+                ),
+                "{conflict:?}"
+            );
+        }
+        let err = check_field_ops(&ops(vec![set("x"), set("a"), set("a.b")])).unwrap_err();
+        assert_eq!(
+            err,
+            WriteError::Overlap {
+                first: path("a"),
+                second: path("a.b")
+            }
+        );
+        assert!(err.to_string().contains("`a` and `a.b`"));
+    }
+
+    #[test]
+    fn siblings_and_lookalikes_do_not_overlap() {
+        let set = |p: &str| FieldOp::Set(p.parse().unwrap(), Value::Int(1));
+        let fine = ops(vec![
+            set("a.b"),
+            set("a.c"),
+            set("ab"),
+            set("`a.b`"),
+            set("a2"),
+        ]);
+        assert_eq!(check_field_ops(&fine), Ok(()));
     }
 }

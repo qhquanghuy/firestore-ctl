@@ -202,6 +202,33 @@ async fn adc_headers() -> Result<GoogleAuthHeaders, CredentialFailure> {
     Ok(headers)
 }
 
+/// What `gcloud auth print-access-token` failure with this `stderr` means: the `ERROR:`
+/// line (the rest is warnings and how-tos) as the reason, and a network problem when it
+/// reads like one, so a flaky connection is not reported as a bad login.
+fn gcloud_failure(stderr: &str) -> CredentialFailure {
+    const NETWORK_HINTS: [&str; 8] = [
+        "unable to connect",
+        "failed to establish",
+        "name or service not known",
+        "temporary failure in name resolution",
+        "could not resolve",
+        "network is unreachable",
+        "timed out",
+        "connection",
+    ];
+    let reason = stderr
+        .lines()
+        .find(|line| line.starts_with("ERROR"))
+        .or_else(|| stderr.lines().next())
+        .unwrap_or("no output")
+        .trim();
+    let lower = stderr.to_lowercase();
+    CredentialFailure {
+        reason: format!("`gcloud auth print-access-token` failed: {reason}"),
+        network: NETWORK_HINTS.iter().any(|hint| lower.contains(hint)),
+    }
+}
+
 /// The token `gcloud auth print-access-token` prints, fetched once.
 async fn gcloud_headers() -> Result<GoogleAuthHeaders, CredentialFailure> {
     let out = Command::new("gcloud")
@@ -212,17 +239,7 @@ async fn gcloud_headers() -> Result<GoogleAuthHeaders, CredentialFailure> {
         .await
         .map_err(|e| CredentialFailure::rejected(format!("cannot run gcloud: {e}")))?;
     if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        // gcloud's explanation is the `ERROR:` line; the rest is warnings and how-tos.
-        let reason = stderr
-            .lines()
-            .find(|line| line.starts_with("ERROR"))
-            .or_else(|| stderr.lines().next())
-            .unwrap_or("no output");
-        return Err(CredentialFailure::rejected(format!(
-            "`gcloud auth print-access-token` failed: {}",
-            reason.trim()
-        )));
+        return Err(gcloud_failure(&String::from_utf8_lossy(&out.stderr)));
     }
     let token = String::from_utf8_lossy(&out.stdout).trim().to_owned();
     if token.is_empty() {
@@ -235,16 +252,16 @@ async fn gcloud_headers() -> Result<GoogleAuthHeaders, CredentialFailure> {
         .map_err(|e| CredentialFailure::rejected(e.to_string()))
 }
 
-/// The conventional place `gcloud auth application-default login` writes to.
+/// The login file `gcloud auth application-default login` writes, at the one place
+/// google-cloud-auth reads it (`$HOME/.config/gcloud`; `CLOUDSDK_CONFIG` is ignored).
 fn well_known_adc_file(env: &impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    let non_empty = |name: &str| env(name).filter(|v| !v.trim().is_empty());
-    non_empty("CLOUDSDK_CONFIG")
-        .map(PathBuf::from)
-        .or_else(|| non_empty("HOME").map(|home| PathBuf::from(home).join(".config/gcloud")))
-        .map(|dir| dir.join("application_default_credentials.json"))
+    env("HOME")
+        .filter(|home| !home.trim().is_empty())
+        .map(|home| PathBuf::from(home).join(".config/gcloud/application_default_credentials.json"))
 }
 
-/// Whether Application Default Credentials can exist here: a key file named by
+/// Whether google-cloud-auth would find Application Default Credentials here (it reads
+/// exactly these places): a key file named by
 /// `GOOGLE_APPLICATION_CREDENTIALS`, the well-known login file, or a Google-hosted
 /// environment (whose metadata server is not probed). When none does, trying ADC would
 /// only wait on a metadata server that is not there.
@@ -441,24 +458,51 @@ mod tests {
     }
 
     #[test]
-    fn adc_login_file_is_looked_up_under_cloudsdk_config_else_home() {
+    fn adc_login_file_is_only_looked_up_under_home_like_the_auth_library() {
         let only = |expected: &'static str| move |p: &Path| p == Path::new(expected);
+        let login = "/home/u/.config/gcloud/application_default_credentials.json";
         assert!(adc_available(
             env(&[("HOME", "/home/u")]),
-            only("/home/u/.config/gcloud/application_default_credentials.json"),
+            only(login),
             false
         ));
-        assert!(adc_available(
+        // CLOUDSDK_CONFIG is not consulted: the library would not read that file.
+        assert!(!adc_available(
             env(&[("HOME", "/home/u"), ("CLOUDSDK_CONFIG", "/cfg")]),
             only("/cfg/application_default_credentials.json"),
             false
         ));
-        // HOME is ignored once CLOUDSDK_CONFIG is set.
-        assert!(!adc_available(
+        assert!(adc_available(
             env(&[("HOME", "/home/u"), ("CLOUDSDK_CONFIG", "/cfg")]),
-            only("/home/u/.config/gcloud/application_default_credentials.json"),
+            only(login),
             false
         ));
+        assert!(!adc_available(env(&[]), |_| true, false));
+    }
+
+    #[test]
+    fn gcloud_network_errors_are_told_apart_from_login_errors() {
+        let network = [
+            "ERROR: (gcloud.auth.print-access-token) There was a problem refreshing your current auth tokens: Unable to connect to accounts.google.com",
+            "ERROR: Failed to establish a new connection",
+            "ERROR: [Errno -2] Name or service not known",
+            "ERROR: Connection reset by peer",
+            "ERROR: the read operation timed out",
+        ];
+        for stderr in network {
+            assert!(gcloud_failure(stderr).network, "{stderr}");
+        }
+        let login = "WARNING: x\nERROR: (gcloud.auth.print-access-token) You do not currently have an active account selected.\nPlease run:\n  $ gcloud auth login";
+        let f = gcloud_failure(login);
+        assert!(!f.network);
+        assert_eq!(
+            f.reason,
+            "`gcloud auth print-access-token` failed: ERROR: (gcloud.auth.print-access-token) You do not currently have an active account selected."
+        );
+        assert_eq!(
+            gcloud_failure("").reason,
+            "`gcloud auth print-access-token` failed: no output"
+        );
     }
 
     #[test]

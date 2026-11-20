@@ -18,12 +18,11 @@ use gcloud_sdk::google::firestore::v1::structured_query::{
 };
 use gcloud_sdk::google::firestore::v1::value::ValueType;
 use gcloud_sdk::prost_types;
-use itertools::Itertools;
 
 use crate::domain::{
     AggregateQuery, Aggregation, DbTarget, Direction, DocPath, FieldOp, FieldPath, Fields, Filter,
     Guard, Op, OrderBy, Query, Scope, SetDoc, SetMode, Timestamp, UpdateDoc, UpdateTime, Value,
-    Write,
+    Write, check_field_ops,
 };
 use crate::port::GatewayError;
 
@@ -307,7 +306,7 @@ fn merge_mask(data: &Fields) -> Result<proto::DocumentMask, GatewayError> {
 }
 
 fn update(u: &UpdateDoc, t: &DbTarget) -> Result<proto::Write, GatewayError> {
-    reject_overlaps(u)?;
+    check_field_ops(&u.ops).map_err(|e| GatewayError::Other(e.to_string()))?;
     let sets = u.ops.iter().filter_map(|op| match op {
         FieldOp::Set(path, v) => Some((path, value(v, t))),
         FieldOp::ArrayUnion(..) | FieldOp::ArrayRemove(..) => None,
@@ -334,33 +333,6 @@ fn update(u: &UpdateDoc, t: &DbTarget) -> Result<proto::Write, GatewayError> {
             .collect(),
         current_document: guarded(u.guard, Some(ConditionType::Exists(true))),
     })
-}
-
-fn op_path(op: &FieldOp) -> &FieldPath {
-    match op {
-        FieldOp::Set(p, _) | FieldOp::ArrayUnion(p, _) | FieldOp::ArrayRemove(p, _) => p,
-    }
-}
-
-/// Firestore rejects an update that touches a field twice or both a map and something
-/// inside it (`a` with `a.b`), including a set plus an array change of one field. Say
-/// so before sending, naming the two paths.
-fn reject_overlaps(u: &UpdateDoc) -> Result<(), GatewayError> {
-    let overlaps = |a: &FieldPath, b: &FieldPath| {
-        a.segments().starts_with(b.segments()) || b.segments().starts_with(a.segments())
-    };
-    u.ops
-        .iter()
-        .map(op_path)
-        .collect_vec()
-        .into_iter()
-        .array_combinations::<2>()
-        .find(|[a, b]| overlaps(a, b))
-        .map_or(Ok(()), |[a, b]| {
-            Err(GatewayError::Other(format!(
-                "conflicting changes to `{a}` and `{b}`: each field can be changed once, and not together with a field inside it"
-            )))
-        })
 }
 
 fn array_transform(op: &FieldOp, t: &DbTarget) -> Option<FieldTransform> {

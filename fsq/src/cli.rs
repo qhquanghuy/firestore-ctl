@@ -20,7 +20,7 @@ use crate::codec::typed_json;
 use crate::domain::{
     AggregateQuery, Aggregation, AnyPath, CollectionId, DatabaseId, DbTarget, DeleteDoc, DocPath,
     FieldOp, FieldPath, Filter, Guard, IdError, Limit, NonEmptyVec, OrderBy, ProjectId, Query,
-    Scope, SetDoc, SetMode, UpdateDoc, UpdateTime, Write,
+    Scope, SetDoc, SetMode, UpdateDoc, UpdateTime, Write, check_field_ops,
 };
 use crate::parse::{parse_field, unquoted};
 use crate::render::{Format, Layout, RenderOpts, Typing};
@@ -94,7 +94,8 @@ Exit codes:
   5  precondition failed (changed since --if-unchanged-since)
   6  writes disabled for this database
   7  missing index (the error lists the index to create)
-  8  authentication failed (run: gcloud auth application-default login)
+  8  authentication or permission failure (login: gcloud auth application-default login;
+     permission: grant the account Firestore access)
 "#;
 
 /// Query Firestore from the command line.
@@ -574,6 +575,10 @@ impl Cli {
                 if_unchanged_since,
             } => NonEmptyVec::try_from(set)
                 .map_err(|e| AppError::Input(e.to_string()))
+                .and_then(|ops| {
+                    check_field_ops(&ops).map_err(|e| AppError::Input(e.to_string()))?;
+                    Ok(ops)
+                })
                 .map(|ops| {
                     Request::Write(Write::Update(UpdateDoc {
                         path,
@@ -848,7 +853,7 @@ mod tests {
             "--set",
             "tags+=vip",
             "--set",
-            "tags-=[x]",
+            "old-=[x]",
         ])
         .unwrap() else {
             panic!("not an update")

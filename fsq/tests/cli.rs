@@ -454,3 +454,25 @@ fn read_from_an_unreachable_endpoint_exits_1() {
         .code(1)
         .stderr(contains("cannot connect to Firestore"));
 }
+
+#[test]
+fn overlapping_update_paths_are_a_usage_error() {
+    // Usage error (2) while building the request: before any connection.
+    fsq()
+        .env("FSQ_WRITABLE", "p/d")
+        .args([
+            "--project",
+            "p",
+            "--database",
+            "d",
+            "update",
+            "users/u1",
+            "--set",
+            "a={\"x\":1}",
+            "--set",
+            "a.b=2",
+        ])
+        .assert()
+        .code(2)
+        .stderr(contains("conflicting changes to `a` and `a.b`"));
+}

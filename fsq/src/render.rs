@@ -109,7 +109,9 @@ pub fn render(o: &Output, opts: &RenderOpts) -> String {
 
 /// Text for stderr; ends with `\n` like [`render`]. The error's message once, plus
 /// what to do about it: for a missing index the `gcloud` command and the console link
-/// (each labelled, on its own line); for an authentication failure the login command, for a permission failure a pointer to IAM.
+/// (each labelled, on its own line); for an authentication failure the login command;
+/// for a permission failure a pointer to IAM. Every variant is listed, so a new one
+/// forces a decision here.
 #[must_use]
 pub fn render_error(e: &AppError, t: &DbTarget) -> String {
     let message = e.to_string();
@@ -136,7 +138,17 @@ pub fn render_error(e: &AppError, t: &DbTarget) -> String {
             message,
             "run: gcloud auth application-default login".to_owned(),
         ],
-        _ => vec![message],
+        AppError::Gateway(
+            GatewayError::NotFound(_)
+            | GatewayError::AlreadyExists(_)
+            | GatewayError::PreconditionFailed(_)
+            | GatewayError::ResourceNotFound(_)
+            | GatewayError::Other(_),
+        )
+        | AppError::WritesDisabled(_)
+        | AppError::Policy(_)
+        | AppError::NotFound(_)
+        | AppError::Input(_) => vec![message],
     };
     lines.into_iter().map(|l| l + "\n").collect()
 }
