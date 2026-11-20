@@ -48,6 +48,19 @@ pub enum IndexState {
     Unknown,
 }
 
+impl IndexState {
+    /// The state as written in output: `ready`, `creating`, `needs-repair` or `unknown`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Creating => "creating",
+            Self::NeedsRepair => "needs-repair",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// An existing index and its state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexInfo {

@@ -10,8 +10,8 @@ use serde_json::{Map, Value as Json, json};
 
 use crate::app::{AppError, Output};
 use crate::codec::{plain_json, typed_json};
-use crate::domain::{Aggregation, DbTarget, Document, IndexMode, QueryScope};
-use crate::port::{AggregateResult, GatewayError, IndexInfo, IndexState, Written};
+use crate::domain::{Aggregation, DbTarget, Document};
+use crate::port::{AggregateResult, GatewayError, IndexInfo, Written};
 
 /// Shown in a table cell where a document has no such field.
 const MISSING_CELL: &str = "—";
@@ -57,30 +57,23 @@ pub struct RenderOpts {
 }
 
 impl RenderOpts {
-    /// Applies the defaults for a terminal (`is_tty`) or a pipe, then the flags.
-    ///
-    /// Format defaults to a table on a terminal and JSON otherwise. JSON is indented
-    /// on a terminal and compact otherwise; `jsonl` is always compact, and `compact`
-    /// wins over `pretty` if both are given. `plain` drops the type tags.
+    /// Applies the defaults for a terminal (`is_tty`) or a pipe to what the flags left
+    /// unset: a table on a terminal and JSON otherwise; JSON indented on a terminal and
+    /// compact otherwise. `jsonl` is always compact, whatever `layout` says.
     #[must_use]
-    // The booleans mirror the independent CLI flags one to one.
-    #[allow(clippy::fn_params_excessive_bools)]
     pub fn resolve(
         is_tty: bool,
         format: Option<Format>,
-        pretty: bool,
-        compact: bool,
-        plain: bool,
+        layout: Option<Layout>,
+        typing: Typing,
     ) -> Self {
         let format = format.unwrap_or(if is_tty { Format::Table } else { Format::Json });
-        let layout = if format == Format::Jsonl || compact {
-            Layout::Compact
-        } else if pretty || is_tty {
-            Layout::Pretty
-        } else {
-            Layout::Compact
+        let layout = match (format, layout) {
+            (Format::Jsonl, _) => Layout::Compact,
+            (_, Some(layout)) => layout,
+            (_, None) if is_tty => Layout::Pretty,
+            (_, None) => Layout::Compact,
         };
-        let typing = if plain { Typing::Plain } else { Typing::Typed };
         Self {
             format,
             layout,
@@ -114,28 +107,48 @@ pub fn render(o: &Output, opts: &RenderOpts) -> String {
     }
 }
 
-/// Text for stderr, without a trailing newline: the error's message once, plus what
-/// to do about it (the `gcloud` command and console link for a missing index, the
-/// login command for an authentication failure).
+/// Text for stderr; ends with `\n` like [`render`]. The error's message once, plus
+/// what to do about it: for a missing index the `gcloud` command and the console link
+/// (each labelled, on its own line); for an authentication failure the login command.
 #[must_use]
 pub fn render_error(e: &AppError, t: &DbTarget) -> String {
     let message = e.to_string();
-    match e {
+    let lines: Vec<String> = match e {
         AppError::MissingIndex {
             advice,
             console_url,
-        } => iter::once(message)
-            .chain(advice.as_ref().map(|a| a.gcloud_command(t)))
-            .chain(console_url.clone())
-            .join("\n"),
+        } => index_help(
+            message,
+            advice.as_ref().map(|a| a.gcloud_command(t)),
+            console_url.as_ref(),
+        ),
         AppError::Gateway(GatewayError::MissingIndex { console_url }) => {
-            iter::once(message).chain(console_url.clone()).join("\n")
+            index_help(message, None, console_url.as_ref())
         }
-        AppError::Gateway(GatewayError::Auth(_)) => {
-            format!("{message}\nrun: gcloud auth application-default login")
-        }
-        _ => message,
-    }
+        AppError::Gateway(GatewayError::Auth(_)) => vec![
+            message,
+            "run: gcloud auth application-default login".to_owned(),
+        ],
+        _ => vec![message],
+    };
+    lines.into_iter().map(|l| l + "\n").collect()
+}
+
+/// The message, then the command that creates the index and/or the console link.
+fn index_help(message: String, command: Option<String>, url: Option<&String>) -> Vec<String> {
+    let open = if command.is_some() {
+        "or open:"
+    } else {
+        "open:"
+    };
+    iter::once(message)
+        .chain(
+            command
+                .into_iter()
+                .flat_map(|c| ["create the index with:".to_owned(), c]),
+        )
+        .chain(url.into_iter().flat_map(|u| [open.to_owned(), u.clone()]))
+        .collect()
 }
 
 /// The JSON form of an output: one value, or a list of them.
@@ -181,14 +194,15 @@ fn object(entries: Vec<(String, Json)>) -> Json {
 }
 
 /// `count`, `sum_<field>` and `avg_<field>` keys with their values, in request order
-/// (a table keeps that order; JSON objects print keys sorted).
+/// (a table keeps that order; JSON objects print keys sorted). The field is its raw
+/// segments joined by `.`, without Firestore's backtick quoting.
 fn aggregate_entries(r: &AggregateResult, typing: Typing) -> Vec<(String, Json)> {
     r.entries()
         .map(|(aggregation, value)| {
             let key = match aggregation {
                 Aggregation::Count => "count".to_owned(),
-                Aggregation::Sum(f) => format!("sum_{}", f.to_firestore()),
-                Aggregation::Avg(f) => format!("avg_{}", f.to_firestore()),
+                Aggregation::Sum(f) => format!("sum_{}", f.segments().join(".")),
+                Aggregation::Avg(f) => format!("avg_{}", f.segments().join(".")),
             };
             let value = match typing {
                 Typing::Typed => typed_json::value_to_json(value),
@@ -209,38 +223,14 @@ fn written_entries(path: &str, result: Written) -> Vec<(String, Json)> {
 
 fn index_json(i: &IndexInfo) -> Json {
     json!({
-        "collection_group": i.spec.collection_group.to_string(),
-        "scope": scope_name(i.spec.scope),
+        "collectionGroup": i.spec.collection_group.to_string(),
+        "queryScope": i.spec.scope.as_str(),
         "fields": i.spec.fields.iter().map(|f| json!({
             "field": f.field.to_firestore(),
-            "mode": mode_name(f.mode),
+            "mode": f.mode.as_str(),
         })).collect::<Vec<_>>(),
-        "state": state_name(i.state),
+        "state": i.state.as_str(),
     })
-}
-
-fn scope_name(s: QueryScope) -> &'static str {
-    match s {
-        QueryScope::Collection => "collection",
-        QueryScope::CollectionGroup => "collection-group",
-    }
-}
-
-fn mode_name(m: IndexMode) -> &'static str {
-    match m {
-        IndexMode::Asc => "asc",
-        IndexMode::Desc => "desc",
-        IndexMode::ArrayContains => "array-contains",
-    }
-}
-
-fn state_name(s: IndexState) -> &'static str {
-    match s {
-        IndexState::Ready => "ready",
-        IndexState::Creating => "creating",
-        IndexState::NeedsRepair => "needs-repair",
-        IndexState::Unknown => "unknown",
-    }
 }
 
 /// A table's header and rows, as the text of each cell.
@@ -259,7 +249,7 @@ fn grid(o: &Output) -> Grid {
             rows: cs.iter().map(|c| vec![c.to_string()]).collect(),
         },
         Output::Indexes(is) => Grid {
-            header: ["collection_group", "scope", "fields", "state"]
+            header: ["collectionGroup", "queryScope", "fields", "state"]
                 .map(str::to_owned)
                 .to_vec(),
             rows: is
@@ -267,13 +257,13 @@ fn grid(o: &Output) -> Grid {
                 .map(|i| {
                     vec![
                         i.spec.collection_group.to_string(),
-                        scope_name(i.spec.scope).to_owned(),
+                        i.spec.scope.as_str().to_owned(),
                         i.spec
                             .fields
                             .iter()
-                            .map(|f| format!("{} {}", f.field.to_firestore(), mode_name(f.mode)))
+                            .map(|f| format!("{} {}", f.field.to_firestore(), f.mode.as_str()))
                             .join(", "),
-                        state_name(i.state).to_owned(),
+                        i.state.as_str().to_owned(),
                     ]
                 })
                 .collect(),
@@ -284,17 +274,21 @@ fn grid(o: &Output) -> Grid {
     }
 }
 
-/// `_path` plus the union of the documents' top-level keys (first-seen order).
+/// `_path`, `_updateTime` (what `--if-unchanged-since` needs), then the union of the
+/// documents' top-level keys (first-seen order).
 fn documents_grid(ds: &[Document]) -> Grid {
     let columns: Vec<&String> = ds.iter().flat_map(|d| d.data.keys()).unique().collect();
     Grid {
-        header: iter::once("_path".to_owned())
+        header: ["_path", "_updateTime"]
+            .map(str::to_owned)
+            .into_iter()
             .chain(columns.iter().map(|c| (*c).clone()))
             .collect(),
         rows: ds
             .iter()
             .map(|d| {
-                iter::once(d.path.to_string())
+                [d.path.to_string(), d.update_time.to_string()]
+                    .into_iter()
                     .chain(columns.iter().map(|c| {
                         d.data.get(*c).map_or_else(
                             || MISSING_CELL.to_owned(),
@@ -323,13 +317,31 @@ fn cell(j: &Json) -> String {
     }
 }
 
+/// `s` with control characters (newlines, tabs, ANSI escapes, ...) shown as escape
+/// sequences, so stored data cannot move the cursor or restyle the terminal.
+fn escape_controls(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| match c {
+            '\n' => "\\n".chars().collect::<Vec<_>>(),
+            '\r' => "\\r".chars().collect(),
+            '\t' => "\\t".chars().collect(),
+            c if c.is_control() => format!("\\u{{{:x}}}", u32::from(c)).chars().collect(),
+            c => vec![c],
+        })
+        .collect()
+}
+
 fn table_text(g: &Grid) -> String {
     let mut table = Table::new();
     table
         .load_preset(presets::UTF8_FULL_CONDENSED)
         .set_content_arrangement(ContentArrangement::Disabled)
-        .set_header(&g.header)
-        .add_rows(&g.rows);
+        .set_header(g.header.iter().map(|h| escape_controls(h)))
+        .add_rows(
+            g.rows
+                .iter()
+                .map(|row| row.iter().map(|c| escape_controls(c)).collect::<Vec<_>>()),
+        );
     format!("{table}\n")
 }
 
@@ -398,37 +410,48 @@ mod tests {
 
     #[test]
     fn resolve_defaults() {
+        let resolve = RenderOpts::resolve;
         assert_eq!(
-            RenderOpts::resolve(true, None, false, false, false).format,
+            resolve(true, None, None, Typing::Typed).format,
             Format::Table
         );
-        let piped = RenderOpts::resolve(false, None, false, false, false);
+        let piped = resolve(false, None, None, Typing::Typed);
         assert_eq!(
             (piped.format, piped.layout),
             (Format::Json, Layout::Compact)
         );
         assert_eq!(
-            RenderOpts::resolve(true, Some(Format::Json), false, false, false).layout,
+            resolve(true, Some(Format::Json), None, Typing::Typed).layout,
             Layout::Pretty
-        );
-        assert_eq!(
-            RenderOpts::resolve(true, Some(Format::Jsonl), true, false, false).layout,
-            Layout::Compact
         );
     }
 
     #[test]
     fn resolve_flags_override_defaults() {
-        let o = RenderOpts::resolve(false, Some(Format::Json), true, false, false);
-        assert_eq!(o.layout, Layout::Pretty);
-        let o = RenderOpts::resolve(true, Some(Format::Json), false, true, false);
-        assert_eq!(o.layout, Layout::Compact);
-        assert_eq!(
-            RenderOpts::resolve(true, None, false, false, false).typing,
-            Typing::Typed
+        let resolve = RenderOpts::resolve;
+        let pretty_piped = resolve(
+            false,
+            Some(Format::Json),
+            Some(Layout::Pretty),
+            Typing::Typed,
         );
+        assert_eq!(pretty_piped.layout, Layout::Pretty);
+        let compact_tty = resolve(
+            true,
+            Some(Format::Json),
+            Some(Layout::Compact),
+            Typing::Typed,
+        );
+        assert_eq!(compact_tty.layout, Layout::Compact);
+        let jsonl = resolve(
+            true,
+            Some(Format::Jsonl),
+            Some(Layout::Pretty),
+            Typing::Typed,
+        );
+        assert_eq!(jsonl.layout, Layout::Compact);
         assert_eq!(
-            RenderOpts::resolve(true, None, false, false, true).typing,
+            resolve(true, None, None, Typing::Plain).typing,
             Typing::Plain
         );
     }
@@ -496,16 +519,52 @@ mod tests {
         let out = render(&two_docs(), &table());
         assert_eq!(
             cells(out.lines().nth(1).unwrap()),
-            ["_path", "name", "score", "plan"]
+            ["_path", "_updateTime", "name", "score", "plan"]
         );
     }
 
     #[test]
     fn table_cells_are_plain_json_with_dash_for_missing() {
+        const T: &str = "2026-01-05T10:00:00.123456789Z";
         let out = render(&two_docs(), &table());
         let row = |needle: &str| cells(out.lines().find(|l| l.contains(needle)).unwrap());
-        assert_eq!(row("users/a"), ["users/a", "Ann", "1.5", "—"]);
-        assert_eq!(row("users/b"), ["users/b", "Bob", "—", "pro"]);
+        assert_eq!(row("users/a"), ["users/a", T, "Ann", "1.5", "—"]);
+        assert_eq!(row("users/b"), ["users/b", T, "Bob", "—", "pro"]);
+    }
+
+    #[test]
+    fn single_document_table_shows_update_time() {
+        let o = Output::Document(doc("users/a", &[("n", Value::Int(1))]));
+        let out = render(&o, &table());
+        assert_eq!(
+            cells(out.lines().nth(1).unwrap()),
+            ["_path", "_updateTime", "n"]
+        );
+        let row = cells(out.lines().find(|l| l.contains("users/a")).unwrap());
+        assert_eq!(row, ["users/a", "2026-01-05T10:00:00.123456789Z", "1"]);
+    }
+
+    #[test]
+    fn table_escapes_control_characters() {
+        let o = Output::Document(doc(
+            "users/a",
+            &[("k\u{1b}[31m", "a\nb\tc\u{1b}[2Jd\re".into())],
+        ));
+        let out = render(&o, &table());
+        assert!(!out.contains('\u{1b}') && !out.contains('\t') && !out.contains('\r'));
+        assert!(out.contains(r"a\nb\tc\u{1b}[2Jd\re"), "{out}");
+        assert!(out.contains(r"k\u{1b}[31m"), "{out}");
+        assert_eq!(out.lines().count(), 5, "{out}");
+    }
+
+    #[test]
+    fn empty_documents_render_header_only_table_and_empty_json() {
+        let o = Output::Documents(vec![]);
+        let t = render(&o, &table());
+        assert_eq!(cells(t.lines().nth(1).unwrap()), ["_path", "_updateTime"]);
+        assert!(!t.contains('—'));
+        assert_eq!(render(&o, &compact_json()), "[]\n");
+        assert_eq!(render(&o, &jsonl()), "");
     }
 
     #[test]
@@ -548,6 +607,26 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_keys_use_raw_field_segments() {
+        let o = Output::Aggregate(AggregateResult::new(vec![
+            (
+                Aggregation::Sum("`my-field`".parse().unwrap()),
+                Value::Int(1),
+            ),
+            (Aggregation::Avg("a.b".parse().unwrap()), Value::Int(2)),
+        ]));
+        assert_eq!(
+            render(&o, &compact_json()),
+            "{\"avg_a.b\":2,\"sum_my-field\":1}\n"
+        );
+        let t = render(&o, &table());
+        assert_eq!(
+            cells(t.lines().nth(1).unwrap()),
+            ["sum_my-field", "avg_a.b"]
+        );
+    }
+
+    #[test]
     fn collections_render_as_ids() {
         let o = Output::Collections(vec!["users".parse().unwrap(), "teams".parse().unwrap()]);
         assert_eq!(
@@ -581,8 +660,8 @@ mod tests {
         assert_eq!(
             parse(&render(&o, &compact_json())),
             json!([{
-                "collection_group": "users",
-                "scope": "collection",
+                "collectionGroup": "users",
+                "queryScope": "collection",
                 "fields": [
                     {"field": "status", "mode": "asc"},
                     {"field": "age", "mode": "desc"}
@@ -642,15 +721,15 @@ mod tests {
     #[test]
     fn missing_index_error_shows_gcloud_command() {
         let out = render_error(&missing_index(), &target());
-        assert!(
-            out.contains("gcloud firestore indexes composite create"),
-            "{out}"
-        );
-        assert!(out.contains("--database=d"));
         let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 3, "{out}");
-        assert!(lines[1].starts_with("gcloud "));
-        assert_eq!(lines[2], "https://console.firebase.google.com/idx");
+        assert!(out.ends_with('\n'));
+        assert_eq!(lines.len(), 5, "{out}");
+        assert!(lines[0].contains("requires an index"));
+        assert_eq!(lines[1], "create the index with:");
+        assert!(lines[2].starts_with("gcloud firestore indexes composite create"));
+        assert!(lines[2].contains("--database=d"));
+        assert_eq!(lines[3], "or open:");
+        assert_eq!(lines[4], "https://console.firebase.google.com/idx");
     }
 
     #[test]
@@ -659,7 +738,52 @@ mod tests {
             advice: None,
             console_url: None,
         };
-        assert_eq!(render_error(&e, &target()), e.to_string());
+        assert_eq!(render_error(&e, &target()), format!("{e}\n"));
+    }
+
+    #[test]
+    fn missing_index_with_advice_but_no_url_omits_the_link() {
+        let e = match missing_index() {
+            AppError::MissingIndex { advice, .. } => AppError::MissingIndex {
+                advice,
+                console_url: None,
+            },
+            other => other,
+        };
+        let out = render_error(&e, &target());
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 3, "{out}");
+        assert_eq!(lines[1], "create the index with:");
+        assert!(lines[2].starts_with("gcloud "));
+    }
+
+    #[test]
+    fn single_field_advice_renders_its_command() {
+        let q = Query {
+            scope: Scope::Group {
+                parent: None,
+                id: "users".parse().unwrap(),
+            },
+            filters: vec![],
+            order: vec!["age:desc".parse::<OrderBy>().unwrap()],
+            limit: None,
+            offset: 0,
+            select: None,
+        };
+        let advice = required_index(&q);
+        assert!(matches!(
+            advice,
+            Some(crate::domain::IndexAdvice::SingleField { .. })
+        ));
+        let e = AppError::MissingIndex {
+            advice,
+            console_url: None,
+        };
+        let out = render_error(&e, &target());
+        assert!(
+            out.contains("gcloud firestore indexes fields update age --project=p --database=d"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -677,18 +801,18 @@ mod tests {
             .authorize(&target())
             .unwrap_err();
         let out = render_error(&AppError::WritesDisabled(denied), &target());
-        assert_eq!(out, "writes are disabled for database p/d");
+        assert_eq!(out, "writes are disabled for database p/d\n");
         assert!(!out.contains("FSQ_WRITABLE"));
     }
 
     #[test]
     fn other_errors_render_their_display_once() {
         let e = AppError::Gateway(GatewayError::Other("boom".to_owned()));
-        assert_eq!(render_error(&e, &target()), "boom");
+        assert_eq!(render_error(&e, &target()), "boom\n");
         let e = AppError::NotFound("users/a".parse().unwrap());
-        assert_eq!(render_error(&e, &target()), "document not found: users/a");
+        assert_eq!(render_error(&e, &target()), "document not found: users/a\n");
         let e = AppError::Gateway(GatewayError::ResourceNotFound("db".to_owned()));
-        assert_eq!(render_error(&e, &target()), "not found: db");
+        assert_eq!(render_error(&e, &target()), "not found: db\n");
     }
 
     #[test]
@@ -697,6 +821,6 @@ mod tests {
             console_url: Some("https://x".to_owned()),
         });
         let out = render_error(&e, &target());
-        assert_eq!(out.lines().last(), Some("https://x"));
+        assert_eq!(out.lines().collect::<Vec<_>>()[1..], ["open:", "https://x"]);
     }
 }

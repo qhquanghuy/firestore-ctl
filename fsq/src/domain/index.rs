@@ -18,6 +18,18 @@ pub enum IndexMode {
     ArrayContains,
 }
 
+impl IndexMode {
+    /// The mode as written in output: `asc`, `desc` or `array-contains`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Asc => "asc",
+            Self::Desc => "desc",
+            Self::ArrayContains => "array-contains",
+        }
+    }
+}
+
 /// One field of an index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexField {
@@ -34,6 +46,17 @@ pub enum QueryScope {
     Collection,
     /// All collections with the group's name.
     CollectionGroup,
+}
+
+impl QueryScope {
+    /// The scope as written in output: `collection` or `collection-group`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Collection => "collection",
+            Self::CollectionGroup => "collection-group",
+        }
+    }
 }
 
 /// A composite index definition. [`required_index`] only produces specs with at least
