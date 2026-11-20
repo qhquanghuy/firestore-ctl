@@ -1,5 +1,7 @@
 //! The command-line surface, driven through the real binary. None of these tests
-//! reach the network: usage errors and write denial both happen before connecting.
+//! reach a real service: `FIRESTORE_EMULATOR_HOST` points every run at a dead port, so
+//! a test that gets as far as connecting fails there (usage errors and write denial
+//! happen before connecting).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use assert_cmd::Command;
@@ -8,7 +10,9 @@ use predicates::str::contains;
 
 fn fsq() -> Command {
     let mut cmd = Command::cargo_bin("fsq").expect("fsq binary builds");
-    cmd.env_remove("FSQ_PROJECT")
+    // Never reach a real project: a test that gets as far as connecting hits a dead port.
+    cmd.env("FIRESTORE_EMULATOR_HOST", "127.0.0.1:1")
+        .env_remove("FSQ_PROJECT")
         .env_remove("FSQ_DATABASE")
         .env_remove("FSQ_WRITABLE");
     cmd
@@ -423,4 +427,29 @@ fn global_flags_have_their_own_help_section() {
         .assert()
         .success()
         .stdout(contains("Global options:"));
+}
+
+// Nothing listens on port 1. These reach the connection step (so policy, parsing and
+// authorization all passed) and fail there, quickly, without touching any real service.
+#[test]
+fn authorized_write_to_an_unreachable_endpoint_exits_1_not_6() {
+    fsq()
+        .env("FSQ_WRITABLE", "p/d")
+        .timeout(std::time::Duration::from_secs(10))
+        .args(["--project", "p", "--database", "d", "delete", "users/u1"])
+        .assert()
+        .code(1)
+        .stderr(contains(
+            "cannot connect to Firestore at http://127.0.0.1:1",
+        ));
+}
+
+#[test]
+fn read_from_an_unreachable_endpoint_exits_1() {
+    fsq()
+        .timeout(std::time::Duration::from_secs(10))
+        .args(["--project", "p", "--database", "d", "get", "users/u1"])
+        .assert()
+        .code(1)
+        .stderr(contains("cannot connect to Firestore"));
 }
