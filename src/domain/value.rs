@@ -182,7 +182,10 @@ impl From<&str> for Value {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+    use crate::domain::arb;
 
     #[test]
     fn timestamp_keeps_nanoseconds() {
@@ -236,6 +239,38 @@ mod tests {
                 Err(ResourceNameError(bad.to_owned())),
                 "{bad}"
             );
+        }
+    }
+
+    proptest! {
+        #![proptest_config(arb::config())]
+
+        #[test]
+        fn timestamp_display_round_trips(t in arb::timestamp()) {
+            prop_assert_eq!(t.to_string().parse::<Timestamp>(), Ok(t));
+            prop_assert_eq!(Timestamp::from_unix(t.seconds(), t.nanos()), Some(t));
+        }
+
+        #[test]
+        fn timestamp_prints_the_shortest_of_0_3_6_or_9_fraction_digits(t in arb::timestamp()) {
+            let text = t.to_string();
+            let digits = text
+                .split_once('.')
+                .map_or(0, |(_, fraction)| fraction.trim_end_matches('Z').len());
+            let expected = match t.nanos() {
+                0 => 0,
+                n if n % 1_000_000 == 0 => 3,
+                n if n % 1_000 == 0 => 6,
+                _ => 9,
+            };
+            prop_assert_eq!(digits, expected, "{}", text);
+        }
+
+        #[test]
+        fn update_time_display_round_trips_and_keeps_nanoseconds(u in arb::update_time()) {
+            let parsed = u.to_string().parse::<UpdateTime>();
+            prop_assert_eq!(parsed.map(|p| p.timestamp().nanos()), Ok(u.timestamp().nanos()));
+            prop_assert_eq!(u.to_string().parse::<UpdateTime>(), Ok(u));
         }
     }
 }

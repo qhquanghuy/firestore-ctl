@@ -109,3 +109,4 @@ Add a term here before introducing a new concept; rename code when a term change
 | coverage | Share of lines, functions and regions that tests execute, from `cargo llvm-cov`. Report-only; never a gate. |
 | coverage badge | README badge fed by `coverage.json` on the orphan `badges` branch; line coverage of the last `main` run. |
 | property test | A `proptest` test asserting a law (e.g. parse then print is the identity) over generated values, not hand-picked examples. |
+| generator | A `proptest` strategy in `domain::arb` that builds only legal domain values; a test checks it reaches each class of value it claims. |

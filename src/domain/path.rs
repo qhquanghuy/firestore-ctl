@@ -177,7 +177,10 @@ impl FromStr for CollectionPath {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+    use crate::domain::arb;
 
     #[test]
     fn parses_doc_and_collection_paths() {
@@ -294,5 +297,54 @@ mod tests {
     fn error_messages_mention_the_input() {
         let msg = "users".parse::<DocPath>().unwrap_err().to_string();
         assert!(msg.contains("users"), "{msg}");
+    }
+
+    proptest! {
+        #![proptest_config(arb::config())]
+
+        #[test]
+        fn doc_path_display_round_trips(p in arb::doc_path()) {
+            prop_assert_eq!(p.to_string().parse::<DocPath>(), Ok(p));
+        }
+
+        #[test]
+        fn collection_path_display_round_trips(p in arb::collection_path()) {
+            prop_assert_eq!(p.to_string().parse::<CollectionPath>(), Ok(p));
+        }
+
+        #[test]
+        fn segment_count_decides_the_kind(d in arb::doc_path(), c in arb::collection_path()) {
+            prop_assert_eq!(d.to_string().parse::<AnyPath>(), Ok(AnyPath::Doc(d.clone())));
+            prop_assert_eq!(c.to_string().parse::<AnyPath>(), Ok(AnyPath::Collection(c.clone())));
+            prop_assert_eq!(
+                d.to_string().parse::<CollectionPath>(),
+                Err(PathError::ExpectedCollection(d.to_string()))
+            );
+            prop_assert_eq!(
+                c.to_string().parse::<DocPath>(),
+                Err(PathError::ExpectedDoc(c.to_string()))
+            );
+        }
+
+        #[test]
+        fn one_leading_and_one_trailing_slash_are_trimmed(
+            p in arb::doc_path(),
+            leading in any::<bool>(),
+            trailing in any::<bool>(),
+        ) {
+            let text = format!(
+                "{}{p}{}",
+                if leading { "/" } else { "" },
+                if trailing { "/" } else { "" },
+            );
+            prop_assert_eq!(text.parse::<DocPath>(), Ok(p));
+        }
+
+        #[test]
+        fn parsing_never_panics_and_a_parsed_path_reprints_stably(s in arb::text()) {
+            if let Ok(p) = s.parse::<AnyPath>() {
+                prop_assert_eq!(p.to_string().parse::<AnyPath>(), Ok(p));
+            }
+        }
     }
 }

@@ -174,3 +174,10 @@ Terms: see `glossary.md`.
   - `badges` must stay unprotected (a ruleset over all branches would reject the force-push). The README
     badge reads `raw.githubusercontent.com`, which works only while the repo is public. A newer push can
     cancel an in-flight `badge` job (`cancel-in-progress`); the next run restores the badge.
+- **Property tests use one shared generator module and never persist failures.** Generators live in
+  `src/domain/arb.rs` (test-only) and produce only legal domain values, built through each type's own
+  constructor or parser. Each generator has a fixed-seed test that it reaches every class it claims, so a
+  generator cannot quietly narrow.
+  - `failure_persistence` is off. The nix build drops `proptest-regressions/`, so replay files would not run on
+    CI. A real counterexample becomes a named example test instead.
+  - Properties are unit tests next to the code, not in `tests/`: integration tests cannot see test-only helpers.

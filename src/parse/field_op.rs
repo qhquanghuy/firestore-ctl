@@ -87,8 +87,11 @@ fn elements(input: &str, text: &str, value: Value) -> Result<Vec<Value>, ParseEr
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
     use crate::domain::FieldPath;
+    use crate::domain::arb;
 
     fn fp(s: &str) -> FieldPath {
         s.parse().unwrap()
@@ -241,5 +244,48 @@ mod tests {
     fn a_brace_after_the_first_character_is_text() {
         assert_eq!(op("a=x{"), FieldOp::Set(fp("a"), "x{".into()));
         assert_eq!(op("a= x{}"), FieldOp::Set(fp("a"), "x{}".into()));
+    }
+
+    proptest! {
+        #![proptest_config(arb::config())]
+
+        #[test]
+        fn set_union_and_remove_of_an_integer_parse_back(
+            field in arb::field_path(),
+            symbol in prop::sample::select(vec!["=", "+=", "-="]),
+            i in any::<i64>(),
+            before in prop::sample::select(vec!["", " "]),
+            after in prop::sample::select(vec!["", " ", "  "]),
+        ) {
+            let expected = match symbol {
+                "+=" => FieldOp::ArrayUnion(field.clone(), vec![Value::Int(i)]),
+                "-=" => FieldOp::ArrayRemove(field.clone(), vec![Value::Int(i)]),
+                _ => FieldOp::Set(field.clone(), Value::Int(i)),
+            };
+            prop_assert_eq!(
+                format!("{field}{before}{symbol}{after}{i}").parse::<FieldOp>(),
+                Ok(expected)
+            );
+        }
+
+        #[test]
+        fn an_unquoted_value_starting_with_a_brace_is_always_an_error(
+            field in arb::field_path(),
+            symbol in prop::sample::select(vec!["=", "+=", "-="]),
+            after in prop::sample::select(vec!["", " ", "  "]),
+            rest in arb::text(),
+        ) {
+            let error = format!("{field}{symbol}{after}{{{rest}").parse::<FieldOp>();
+            prop_assert!(
+                error.as_ref().is_err_and(|e| e.reason.contains("{...}")),
+                "{:?}",
+                error
+            );
+        }
+
+        #[test]
+        fn parsing_never_panics(s in arb::text()) {
+            s.parse::<FieldOp>().ok();
+        }
     }
 }

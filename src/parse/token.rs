@@ -115,7 +115,10 @@ fn number(s: &str) -> Option<Result<Value, ParseError>> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+    use crate::domain::arb;
 
     #[test]
     fn typed_tokens() {
@@ -225,5 +228,77 @@ mod tests {
             Ok(Value::String("[draft] foo".into()))
         );
         assert_eq!(parse_token("[a"), Ok(Value::String("[a".into())));
+    }
+
+    fn quote(s: &str) -> String {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+
+    fn list_element() -> impl Strategy<Value = (String, Value)> {
+        prop_oneof![
+            any::<i64>().prop_map(|i| (i.to_string(), Value::Int(i))),
+            arb::text().prop_map(|s| (quote(&s), Value::String(s))),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(arb::config())]
+
+        #[test]
+        fn a_canonical_integer_is_an_int(
+            i in prop_oneof![any::<i64>(), Just(i64::MIN), Just(i64::MAX), Just(0), -1_000..1_000_i64],
+        ) {
+            prop_assert_eq!(parse_token(&i.to_string()), Ok(Value::Int(i)));
+        }
+
+        #[test]
+        fn a_finite_double_in_exponent_form_parses_bit_exact(
+            x in prop::num::f64::POSITIVE
+                | prop::num::f64::NEGATIVE
+                | prop::num::f64::NORMAL
+                | prop::num::f64::SUBNORMAL
+                | prop::num::f64::ZERO,
+        ) {
+            let parsed = parse_token(&format!("{x:e}"));
+            let Ok(Value::Double(y)) = parsed else {
+                return Err(TestCaseError::fail(format!("not a double: {parsed:?}")));
+            };
+            prop_assert_eq!(y.to_bits(), x.to_bits());
+        }
+
+        #[test]
+        fn a_quoted_string_is_that_string(s in arb::text()) {
+            prop_assert_eq!(parse_token(&quote(&s)), Ok(Value::String(s)));
+        }
+
+        #[test]
+        fn a_list_of_integers_and_quoted_strings_keeps_every_element(
+            elements in prop::collection::vec(list_element(), 1..=6),
+            separator in prop::sample::select(vec![",", ", ", " , "]),
+        ) {
+            let (texts, expected): (Vec<String>, Vec<Value>) = elements.into_iter().unzip();
+            prop_assert_eq!(
+                parse_token(&format!("[{}]", texts.join(separator))),
+                Ok(Value::Array(expected))
+            );
+        }
+
+        #[test]
+        fn a_ts_prefix_is_a_timestamp(t in arb::timestamp()) {
+            prop_assert_eq!(parse_token(&format!("ts:{t}")), Ok(Value::Timestamp(t)));
+        }
+
+        #[test]
+        fn a_ref_prefix_is_a_document_reference(p in arb::doc_path()) {
+            prop_assert_eq!(parse_token(&format!("ref:{p}")), Ok(Value::Ref(p)));
+        }
+
+        #[test]
+        fn parsing_never_panics(
+            prefix in prop::sample::select(vec!["", "ts:", "ref:", "[", "\"", "-", "["]),
+            s in arb::text(),
+        ) {
+            parse_token(&format!("{prefix}{s}")).ok();
+        }
     }
 }

@@ -140,7 +140,10 @@ impl FromStr for FieldPath {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+    use crate::domain::arb;
 
     #[test]
     fn field_path_quotes_non_identifier_segments() {
@@ -235,5 +238,21 @@ mod tests {
             FieldPath::from_segments(["a".to_owned(), String::new()]),
             Err(FieldPathError::EmptySegment { position: 1, .. })
         ));
+    }
+
+    proptest! {
+        #![proptest_config(arb::config())]
+
+        #[test]
+        fn display_round_trips_for_any_segments(p in arb::field_path()) {
+            prop_assert_eq!(p.to_string().parse::<FieldPath>(), Ok(p));
+        }
+
+        #[test]
+        fn parsing_never_panics_and_a_parsed_path_reprints_stably(s in arb::text()) {
+            if let Ok(p) = s.parse::<FieldPath>() {
+                prop_assert_eq!(p.to_string().parse::<FieldPath>(), Ok(p));
+            }
+        }
     }
 }

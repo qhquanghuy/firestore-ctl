@@ -40,8 +40,11 @@ fn direction(input: &str, text: &str) -> Result<Direction, ParseError> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
     use crate::domain::Direction;
+    use crate::domain::arb;
 
     #[test]
     fn order_by() {
@@ -95,5 +98,38 @@ mod tests {
         assert!("a:".parse::<OrderBy>().is_err());
         assert!(":desc".parse::<OrderBy>().is_err());
         assert!("".parse::<OrderBy>().is_err());
+    }
+
+    proptest! {
+        #![proptest_config(arb::config())]
+
+        #[test]
+        fn field_and_direction_parse_back(
+            field in arb::field_path(),
+            (word, direction) in prop::sample::select(vec![
+                ("asc", Direction::Asc),
+                ("desc", Direction::Desc),
+                ("ASC", Direction::Asc),
+                ("Desc", Direction::Desc),
+            ]),
+        ) {
+            prop_assert_eq!(
+                format!("{field}:{word}").parse::<OrderBy>(),
+                Ok(OrderBy { field, direction })
+            );
+        }
+
+        #[test]
+        fn a_bare_field_is_ascending(field in arb::field_path()) {
+            prop_assert_eq!(
+                field.to_string().parse::<OrderBy>(),
+                Ok(OrderBy { field, direction: Direction::Asc })
+            );
+        }
+
+        #[test]
+        fn parsing_never_panics(s in arb::text()) {
+            s.parse::<OrderBy>().ok();
+        }
     }
 }
