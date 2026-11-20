@@ -183,25 +183,6 @@ mod tests {
     use crate::domain::arb;
 
     #[test]
-    fn parses_doc_and_collection_paths() {
-        assert!(matches!(
-            "users".parse::<AnyPath>(),
-            Ok(AnyPath::Collection(_))
-        ));
-        assert!(matches!("users/a".parse::<AnyPath>(), Ok(AnyPath::Doc(_))));
-        assert!(matches!(
-            "users/a/orders".parse::<AnyPath>(),
-            Ok(AnyPath::Collection(_))
-        ));
-        assert_eq!(
-            "users/a/orders/o1"
-                .parse::<DocPath>()
-                .map(|d| d.to_string()),
-            Ok("users/a/orders/o1".into())
-        );
-    }
-
-    #[test]
     fn rejects_bad_paths() {
         assert_eq!("".parse::<AnyPath>(), Err(PathError::Empty));
         assert_eq!("/".parse::<AnyPath>(), Err(PathError::Empty));

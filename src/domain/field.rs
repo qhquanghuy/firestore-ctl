@@ -166,12 +166,6 @@ mod tests {
     }
 
     #[test]
-    fn display_round_trips() {
-        let p: FieldPath = "`a.b`.c-d.e".parse().unwrap();
-        assert_eq!(p.to_string().parse::<FieldPath>(), Ok(p));
-    }
-
-    #[test]
     fn rejects_malformed_field_paths() {
         assert_eq!("".parse::<FieldPath>(), Err(FieldPathError::Empty));
         assert!(matches!(

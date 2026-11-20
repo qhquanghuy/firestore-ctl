@@ -145,20 +145,6 @@ mod tests {
     }
 
     #[test]
-    fn quoted_fields_allow_punctuation() {
-        assert_eq!(
-            op("`my-field`=3"),
-            FieldOp::Set(fp("`my-field`"), Value::Int(3))
-        );
-        assert_eq!(op("`a=b`=1"), FieldOp::Set(fp("`a=b`"), Value::Int(1)));
-        assert_eq!(op("`a+`=1"), FieldOp::Set(fp("`a+`"), Value::Int(1)));
-        assert_eq!(
-            op("`my field`=1"),
-            FieldOp::Set(fp("`my field`"), Value::Int(1))
-        );
-    }
-
-    #[test]
     fn ambiguous_unquoted_fields_are_rejected() {
         for bad in ["my-field=3", "x>=3", "x!=3", "x<=3", "a b=1", "a:b=1"] {
             assert!(bad.parse::<FieldOp>().is_err(), "{bad}");

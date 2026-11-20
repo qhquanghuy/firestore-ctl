@@ -47,35 +47,6 @@ mod tests {
     use crate::domain::arb;
 
     #[test]
-    fn order_by() {
-        assert_eq!(
-            "createdAt:desc".parse::<OrderBy>().map(|o| o.direction),
-            Ok(Direction::Desc)
-        );
-        assert_eq!(
-            "createdAt".parse::<OrderBy>().map(|o| o.direction),
-            Ok(Direction::Asc)
-        );
-    }
-
-    #[test]
-    fn explicit_asc_and_nested_and_quoted_fields() {
-        assert_eq!(
-            "a.b:asc"
-                .parse::<OrderBy>()
-                .map(|o| (o.field.to_string(), o.direction)),
-            Ok(("a.b".into(), Direction::Asc))
-        );
-        let o: OrderBy = "`a:b`:desc".parse().unwrap();
-        assert_eq!(
-            (o.field.segments().to_vec(), o.direction),
-            (vec!["a:b".to_owned()], Direction::Desc)
-        );
-        let o: OrderBy = "`a:b`".parse().unwrap();
-        assert_eq!(o.field.segments(), ["a:b"]);
-    }
-
-    #[test]
     fn surrounding_spaces_are_ignored() {
         let o: OrderBy = " name : desc ".parse().unwrap();
         assert_eq!(

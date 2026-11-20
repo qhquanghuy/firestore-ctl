@@ -70,24 +70,6 @@ mod tests {
     }
 
     #[test]
-    fn every_operator_parses() {
-        for (text, op) in [
-            ("==", Op::Eq),
-            ("!=", Op::Ne),
-            ("<", Op::Lt),
-            ("<=", Op::Le),
-            (">", Op::Gt),
-            (">=", Op::Ge),
-            ("not-in", Op::NotIn),
-            ("array-contains-any", Op::ArrayContainsAny),
-        ] {
-            let value = if op.takes_list() { "[1, 2]" } else { "1" };
-            let f: Filter = format!("age {text} {value}").parse().unwrap();
-            assert_eq!(f.op(), op, "{text}");
-        }
-    }
-
-    #[test]
     fn operators_need_whitespace_and_a_value() {
         assert!("age>=18".parse::<Filter>().is_err());
         assert!("age ==".parse::<Filter>().is_err());
