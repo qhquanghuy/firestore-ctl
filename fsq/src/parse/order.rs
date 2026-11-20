@@ -2,24 +2,29 @@
 
 use std::str::FromStr;
 
-use super::{ParseError, unquoted};
-use crate::domain::{Direction, FieldPath, OrderBy};
+use super::{ParseError, parse_field, unquoted};
+use crate::domain::{Direction, OrderBy};
 
 impl FromStr for OrderBy {
     type Err = ParseError;
 
     /// `field` sorts ascending; `field:asc` / `field:desc` is explicit. The direction
-    /// follows the last `:` outside backticks, so quote fields that contain one.
+    /// follows the last `:` outside backticks. An unquoted field may not contain
+    /// whitespace or `< > ! = + - :` (backtick-quote such names).
     fn from_str(s: &str) -> Result<Self, ParseError> {
-        let s = s.trim();
-        let (field, direction) = match unquoted(s, '`').filter(|&(_, c)| c == ':').last() {
-            None => (s, Direction::Asc),
-            Some((colon, _)) => (&s[..colon], direction(s, s[colon + 1..].trim())?),
+        let trimmed = s.trim();
+        let (field, direction) = match unquoted(trimmed, '`').filter(|&(_, c)| c == ':').last() {
+            None => (trimmed, Direction::Asc),
+            Some((colon, _)) => (
+                &trimmed[..colon],
+                direction(s, trimmed[colon + 1..].trim())?,
+            ),
         };
-        let field: FieldPath = field
-            .trim()
-            .parse()
-            .map_err(|e| ParseError::new(s, format!("{e}")))?;
+        let field = parse_field(
+            field,
+            "use `field:desc` for direction; backtick-quote field names with spaces or punctuation",
+        )
+        .map_err(|reason| ParseError::new(s, reason))?;
         Ok(Self { field, direction })
     }
 }
@@ -79,6 +84,14 @@ mod tests {
             (o.field.segments().to_vec(), o.direction),
             (vec!["name".to_owned()], Direction::Desc)
         );
+    }
+
+    #[test]
+    fn space_separated_direction_is_rejected_with_a_hint() {
+        let e = "createdAt desc".parse::<OrderBy>().unwrap_err();
+        assert!(e.reason.contains("field:desc"), "{e}");
+        assert!("my-field".parse::<OrderBy>().is_err());
+        assert!("`my-field`:desc".parse::<OrderBy>().is_ok());
     }
 
     #[test]

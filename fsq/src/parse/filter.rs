@@ -2,16 +2,16 @@
 
 use std::str::FromStr;
 
-use super::{ParseError, parse_token, unquoted};
-use crate::domain::{FieldPath, Filter, Op, Value};
+use super::{ParseError, parse_field, parse_token, unquoted};
+use crate::domain::{Filter, Op};
 
 impl FromStr for Filter {
     type Err = ParseError;
 
-    /// Splits at the first whitespace-delimited word that is an operator; the field
-    /// is everything before it (backtick-quote fields containing spaces) and the
-    /// value, parsed as a [token](parse_token), is the rest. A list value is
-    /// required for `in`, `not-in` and `array-contains-any`, and rejected otherwise.
+    /// Splits at the first whitespace-delimited word that is an operator. The field
+    /// is what precedes it: an unquoted field may not contain whitespace or
+    /// `< > ! = + - :` (backtick-quote such names). The value, parsed as a
+    /// [token](parse_token), is the rest; see [`Filter::new`] for the list rules.
     fn from_str(s: &str) -> Result<Self, ParseError> {
         let trimmed = s.trim();
         let (field, op, value) = split(trimmed).ok_or_else(|| {
@@ -20,24 +20,13 @@ impl FromStr for Filter {
                 "expected `<field> <op> <value>` with spaces around the operator",
             )
         })?;
-        let field: FieldPath = field
-            .parse()
-            .map_err(|e| ParseError::new(s, format!("{e}")))?;
-        let value = parse_token(value).map_err(|e| ParseError::new(s, e.to_string()))?;
-        match (op.takes_list(), matches!(value, Value::Array(_))) {
-            (true, false) => Err(ParseError::new(
-                s,
-                format!("`{}` needs a list value like [a, b]", op.symbol()),
-            )),
-            (false, true) => Err(ParseError::new(
-                s,
-                format!(
-                    "`{}` does not take a list (quote it to match a string)",
-                    op.symbol()
-                ),
-            )),
-            _ => Ok(Filter { field, op, value }),
-        }
+        let field = parse_field(
+            field,
+            "backtick-quote field names with spaces or punctuation, e.g. `my-field`",
+        )
+        .map_err(|reason| ParseError::new(s, reason))?;
+        let value = parse_token(value).map_err(|e| ParseError::new(s, e.reason))?;
+        Self::new(field, op, value).map_err(|e| ParseError::new(s, e.reason))
     }
 }
 
@@ -55,23 +44,29 @@ fn split(s: &str) -> Option<(&str, Op, &str)> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::domain::Value;
+
+    fn parts(s: &str) -> (String, Op, Value) {
+        let f: Filter = s.parse().unwrap();
+        (f.field().to_string(), f.op(), f.value().clone())
+    }
 
     #[test]
     fn filters_with_spaces_and_quotes() {
         let f: Filter = r#"name == "John Smith""#.parse().unwrap();
         assert_eq!(
-            (f.op, f.value),
+            (f.op(), f.value().clone()),
             (Op::Eq, Value::String("John Smith".into()))
         );
         let g: Filter = r#"note == "a == b""#.parse().unwrap();
-        assert_eq!(g.value, Value::String("a == b".into()));
+        assert_eq!(g.value(), &Value::String("a == b".into()));
         let h: Filter = r#"id in [a, "b c", 3]"#.parse().unwrap();
         assert_eq!(
-            h.value,
-            Value::Array(vec!["a".into(), "b c".into(), Value::Int(3)])
+            h.value(),
+            &Value::Array(vec!["a".into(), "b c".into(), Value::Int(3)])
         );
         assert_eq!(
-            "tags array-contains vip".parse::<Filter>().map(|f| f.op),
+            "tags array-contains vip".parse::<Filter>().map(|f| f.op()),
             Ok(Op::ArrayContains)
         );
         assert!("status active".parse::<Filter>().is_err());
@@ -92,7 +87,7 @@ mod tests {
         ] {
             let value = if op.takes_list() { "[1, 2]" } else { "1" };
             let f: Filter = format!("age {text} {value}").parse().unwrap();
-            assert_eq!(f.op, op, "{text}");
+            assert_eq!(f.op(), op, "{text}");
         }
     }
 
@@ -107,12 +102,22 @@ mod tests {
     #[test]
     fn fields_may_be_quoted_or_nested() {
         let f: Filter = "`my field` == 1".parse().unwrap();
-        assert_eq!(f.field.segments(), ["my field"]);
+        assert_eq!(f.field().segments(), ["my field"]);
         let g: Filter = "address.city   ==   Tokyo".parse().unwrap();
-        assert_eq!(g.field.segments(), ["address", "city"]);
-        assert_eq!(g.value, Value::String("Tokyo".into()));
+        assert_eq!(g.field().segments(), ["address", "city"]);
+        assert_eq!(g.value(), &Value::String("Tokyo".into()));
         let h: Filter = "`a == b` == 1".parse().unwrap();
-        assert_eq!(h.field.segments(), ["a == b"]);
+        assert_eq!(h.field().segments(), ["a == b"]);
+        let i: Filter = "`my-field` == 1".parse().unwrap();
+        assert_eq!(i.field().segments(), ["my-field"]);
+    }
+
+    #[test]
+    fn unquoted_fields_with_spaces_or_punctuation_are_rejected() {
+        for bad in ["a b == c", "my-field == 1", "a:b == 1", "a+ == 1"] {
+            let e = bad.parse::<Filter>().unwrap_err();
+            assert!(e.reason.contains("backtick"), "{bad}: {e}");
+        }
     }
 
     #[test]
@@ -121,17 +126,25 @@ mod tests {
         assert!("tags array-contains [a]".parse::<Filter>().is_err());
         assert!("age < [1]".parse::<Filter>().is_err());
         assert_eq!(
-            "tags array-contains-any [a, b]"
-                .parse::<Filter>()
-                .map(|f| f.value),
-            Ok(Value::Array(vec!["a".into(), "b".into()]))
+            parts("tags array-contains-any [a, b]").2,
+            Value::Array(vec!["a".into(), "b".into()])
         );
     }
 
     #[test]
-    fn errors_show_the_whole_input() {
+    fn empty_lists_are_rejected() {
+        for op in ["in", "not-in", "array-contains-any"] {
+            assert!(format!("a {op} []").parse::<Filter>().is_err(), "{op}");
+        }
+    }
+
+    #[test]
+    fn errors_show_the_whole_input_once() {
         let e = "status active".parse::<Filter>().unwrap_err();
         assert_eq!(e.input, "status active");
         assert!(e.to_string().starts_with("status active: "), "{e}");
+        let e = "when == ts:soon".parse::<Filter>().unwrap_err();
+        assert_eq!(e.input, "when == ts:soon");
+        assert!(!e.reason.contains("ts:soon:"), "{e}");
     }
 }

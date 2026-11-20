@@ -3,6 +3,8 @@
 
 use thiserror::Error;
 
+use crate::domain::{FieldPath, FieldPathError};
+
 pub mod field_op;
 pub mod filter;
 pub mod order;
@@ -60,6 +62,29 @@ pub(crate) fn unquoted(s: &str, quote: char) -> impl Iterator<Item = (usize, cha
         .flatten()
 }
 
+/// Characters that may not appear in an unquoted field name in a flag: they would
+/// make operators, directions or typos parse as part of the name.
+const RESERVED_IN_FIELD: &str = "<>!=+-:";
+
+/// Parses a field path from a flag (surrounding whitespace ignored). Outside backticks, whitespace and
+/// `< > ! = + - :` are rejected (backtick-quote such names); `hint` is appended
+/// to that error to point at the likely intended syntax.
+pub(crate) fn parse_field(text: &str, hint: &str) -> Result<FieldPath, String> {
+    let text = text.trim();
+    match unquoted(text, '`').find(|&(_, c)| c.is_whitespace() || RESERVED_IN_FIELD.contains(c)) {
+        Some((_, c)) => Err(format!(
+            "unquoted field name `{}` contains {}; {hint}",
+            text,
+            if c.is_whitespace() {
+                "whitespace".to_owned()
+            } else {
+                format!("`{c}`")
+            }
+        )),
+        None => text.parse().map_err(|e: FieldPathError| e.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,5 +96,18 @@ mod tests {
         assert_eq!(visible(r"`a\`=`=", '`'), "=");
         assert_eq!(visible(r#"x "a, b" ,y"#, '"'), "x  ,y");
         assert_eq!(visible("`open=", '`'), "");
+    }
+
+    #[test]
+    fn parse_field_trims_but_rejects_inner_whitespace_and_punctuation() {
+        assert_eq!(
+            parse_field(" a.b ", "h").map(|p| p.to_string()),
+            Ok("a.b".into())
+        );
+        assert!(parse_field("`a b`.c", "h").is_ok());
+        for bad in ["a b", "a-b", "a:b", "a=b", "a>b", "a!b", "a+b"] {
+            let e = parse_field(bad, "HINT").unwrap_err();
+            assert!(e.ends_with("HINT"), "{bad}: {e}");
+        }
     }
 }

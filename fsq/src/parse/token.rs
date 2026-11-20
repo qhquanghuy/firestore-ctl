@@ -94,18 +94,25 @@ fn list(token: &str, inner: &str) -> Result<Vec<Value>, ParseError> {
                 token,
                 "nested lists are not supported (quote the element to make it a string)",
             )),
-            e => parse_token(e),
+            e => parse_token(e).map_err(|inner| {
+                ParseError::new(token, format!("list element `{e}`: {}", inner.reason))
+            }),
         })
         .collect()
 }
 
-/// `Some` when `s` is shaped like a number: an integer (`[+-]?digits`) or a float
-/// (digits with a `.` and/or exponent). Anything else is not a number (`None`);
-/// a number-shaped token that cannot be represented is an error.
+/// `Some` when `s` is shaped like a number: a canonical integer (`0`, `-5`, `42`: no
+/// leading `+` or zeros, which would be lost) or a float (digits with a `.` and/or
+/// exponent). Anything else is not a number (`None`, so a string); a number-shaped
+/// token that cannot be represented is an error.
 fn number(s: &str) -> Option<Result<Value, ParseError>> {
-    let unsigned = s.strip_prefix(['+', '-']).unwrap_or(s);
+    if s.starts_with('+') {
+        return None;
+    }
+    let unsigned = s.strip_prefix('-').unwrap_or(s);
     if !unsigned.is_empty() && unsigned.chars().all(|c| c.is_ascii_digit()) {
-        return Some(s.parse::<i64>().map(Value::Int).map_err(|_| {
+        let canonical = unsigned == "0" || !unsigned.starts_with('0');
+        return canonical.then(|| s.parse::<i64>().map(Value::Int).map_err(|_| {
             ParseError::new(
                 s,
                 "integer does not fit in 64 bits (quote it to use a string, or write it as a float like 1e20)",
@@ -155,12 +162,18 @@ mod tests {
         assert_eq!(parse_token("-7"), Ok(Value::Int(-7)));
         assert_eq!(parse_token("1e3"), Ok(Value::Double(1000.0)));
         assert_eq!(parse_token("-0.5"), Ok(Value::Double(-0.5)));
-        assert_eq!(parse_token("+5"), Ok(Value::Int(5)));
+        assert_eq!(parse_token("0"), Ok(Value::Int(0)));
+        assert_eq!(parse_token("-0"), Ok(Value::Int(0)));
         assert_eq!(parse_token(".5"), Ok(Value::Double(0.5)));
         assert_eq!(parse_token("5."), Ok(Value::Double(5.0)));
         assert_eq!(parse_token("2E-2"), Ok(Value::Double(0.02)));
         // not numbers: stay strings
         for s in [
+            "+5",
+            "+8190123456",
+            "007",
+            "01234",
+            "-007",
             "NaN",
             "inf",
             "1.2.3",

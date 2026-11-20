@@ -2,6 +2,7 @@
 
 use super::field::FieldPath;
 use super::value::Value;
+use crate::parse::ParseError;
 
 /// A comparison operator in a `--where` filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,15 +74,55 @@ impl Op {
     }
 }
 
-/// One `<field> <op> <value>` condition.
+/// One `<field> <op> <value>` condition. The value is a non-empty list exactly
+/// when the operator [takes a list](Op::takes_list); [`Filter::new`] enforces it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Filter {
+    field: FieldPath,
+    op: Op,
+    value: Value,
+}
+
+impl Filter {
+    /// # Errors
+    /// [`ParseError`] if `value` is not a list for `in`/`not-in`/`array-contains-any`,
+    /// is a list for any other operator, or is an empty list.
+    pub fn new(field: FieldPath, op: Op, value: Value) -> Result<Self, ParseError> {
+        let reason = match (&value, op.takes_list()) {
+            (Value::Array(items), true) if items.is_empty() => {
+                Some(format!("`{}` needs a non-empty list", op.symbol()))
+            }
+            (Value::Array(_), true) => None,
+            (_, true) => Some(format!("`{}` needs a list value like [a, b]", op.symbol())),
+            (Value::Array(_), false) => Some(format!(
+                "`{}` does not take a list (quote it to match a string)",
+                op.symbol()
+            )),
+            (_, false) => None,
+        };
+        match reason {
+            Some(reason) => Err(ParseError::new(&format!("{field} {}", op.symbol()), reason)),
+            None => Ok(Self { field, op, value }),
+        }
+    }
+
     /// The field compared.
-    pub field: FieldPath,
+    #[must_use]
+    pub fn field(&self) -> &FieldPath {
+        &self.field
+    }
+
     /// The comparison.
-    pub op: Op,
-    /// The right-hand side (an array exactly when [`Op::takes_list`]).
-    pub value: Value,
+    #[must_use]
+    pub fn op(&self) -> Op {
+        self.op
+    }
+
+    /// The right-hand side.
+    #[must_use]
+    pub fn value(&self) -> &Value {
+        &self.value
+    }
 }
 
 /// Sort direction.
