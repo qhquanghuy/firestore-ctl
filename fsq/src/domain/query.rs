@@ -2,7 +2,7 @@
 
 use super::field::FieldPath;
 use super::value::Value;
-use crate::parse::ParseError;
+use thiserror::Error;
 
 /// A comparison operator in a `--where` filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,26 +83,30 @@ pub struct Filter {
     value: Value,
 }
 
+/// Why a field, operator and value do not form a valid [`Filter`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum FilterError {
+    /// The operator compares against a list but the value is not one.
+    #[error("`{}` needs a list value like [a, b]", .0.symbol())]
+    NeedsList(Op),
+    /// The operator compares against a list but the list is empty.
+    #[error("`{}` needs a non-empty list", .0.symbol())]
+    EmptyList(Op),
+    /// The operator takes a single value but the value is a list.
+    #[error("`{}` does not take a list (quote it to match a string)", .0.symbol())]
+    UnexpectedList(Op),
+}
+
 impl Filter {
     /// # Errors
-    /// [`ParseError`] if `value` is not a list for `in`/`not-in`/`array-contains-any`,
+    /// [`FilterError`] if `value` is not a list for `in`/`not-in`/`array-contains-any`,
     /// is a list for any other operator, or is an empty list.
-    pub fn new(field: FieldPath, op: Op, value: Value) -> Result<Self, ParseError> {
-        let reason = match (&value, op.takes_list()) {
-            (Value::Array(items), true) if items.is_empty() => {
-                Some(format!("`{}` needs a non-empty list", op.symbol()))
-            }
-            (Value::Array(_), true) => None,
-            (_, true) => Some(format!("`{}` needs a list value like [a, b]", op.symbol())),
-            (Value::Array(_), false) => Some(format!(
-                "`{}` does not take a list (quote it to match a string)",
-                op.symbol()
-            )),
-            (_, false) => None,
-        };
-        match reason {
-            Some(reason) => Err(ParseError::new(&format!("{field} {}", op.symbol()), reason)),
-            None => Ok(Self { field, op, value }),
+    pub fn new(field: FieldPath, op: Op, value: Value) -> Result<Self, FilterError> {
+        match (&value, op.takes_list()) {
+            (Value::Array(items), true) if items.is_empty() => Err(FilterError::EmptyList(op)),
+            (Value::Array(_), false) => Err(FilterError::UnexpectedList(op)),
+            (Value::Array(_), true) | (_, false) => Ok(Self { field, op, value }),
+            (_, true) => Err(FilterError::NeedsList(op)),
         }
     }
 
@@ -141,4 +145,33 @@ pub struct OrderBy {
     pub field: FieldPath,
     /// The sort direction.
     pub direction: Direction,
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn field() -> FieldPath {
+        "a".parse().unwrap()
+    }
+
+    #[test]
+    fn filter_new_enforces_list_rules() {
+        let list = |n: usize| Value::Array(vec![Value::Null; n]);
+        assert_eq!(
+            Filter::new(field(), Op::In, Value::Int(1)),
+            Err(FilterError::NeedsList(Op::In))
+        );
+        assert_eq!(
+            Filter::new(field(), Op::NotIn, list(0)),
+            Err(FilterError::EmptyList(Op::NotIn))
+        );
+        assert_eq!(
+            Filter::new(field(), Op::Eq, list(1)),
+            Err(FilterError::UnexpectedList(Op::Eq))
+        );
+        assert!(Filter::new(field(), Op::ArrayContainsAny, list(2)).is_ok());
+        assert!(Filter::new(field(), Op::Lt, Value::Int(1)).is_ok());
+    }
 }

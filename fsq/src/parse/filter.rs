@@ -26,7 +26,7 @@ impl FromStr for Filter {
         )
         .map_err(|reason| ParseError::new(s, reason))?;
         let value = parse_token(value).map_err(|e| ParseError::new(s, e.reason))?;
-        Self::new(field, op, value).map_err(|e| ParseError::new(s, e.reason))
+        Self::new(field, op, value).map_err(|e| ParseError::new(s, e.to_string()))
     }
 }
 

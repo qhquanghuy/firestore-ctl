@@ -201,6 +201,18 @@ mod tests {
     }
 
     #[test]
+    fn list_element_errors_name_the_element_once() {
+        let e = parse_token("[a, ts:soon]").unwrap_err();
+        assert_eq!(e.input, "[a, ts:soon]");
+        assert!(
+            e.reason
+                .starts_with("list element `ts:soon`: invalid timestamp"),
+            "{e}"
+        );
+        assert!(!e.reason.contains("ts:soon: "), "{e}");
+    }
+
+    #[test]
     fn quoted_strings_and_escapes() {
         assert_eq!(parse_token(r#""""#), Ok(Value::String(String::new())));
         assert_eq!(
