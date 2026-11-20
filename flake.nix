@@ -39,9 +39,21 @@
         checkArgs = devArgs // { cargoArtifacts = devArtifacts; };
 
         firectl = craneLib.buildPackage (releaseArgs // { doCheck = false; });
+
+        # Portable release binary: statically linked against musl, so it runs on any
+        # x86_64 Linux. The default package links against /nix/store and only runs where
+        # that store exists.
+        muslCraneLib = crane.mkLib pkgs.pkgsStatic;
+        muslArgs = commonArgs // { doCheck = false; };
+        firectlStatic = muslCraneLib.buildPackage (
+          muslArgs // { cargoArtifacts = muslCraneLib.buildDepsOnly muslArgs; }
+        );
       in
       {
-        packages.default = firectl;
+        packages = {
+          default = firectl;
+        }
+        // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") { static = firectlStatic; };
 
         checks = {
           default = firectl;

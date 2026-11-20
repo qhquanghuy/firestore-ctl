@@ -10,6 +10,24 @@ Run `firectl --help` for the value syntax, field quoting, typed JSON tags and ex
 
 ## Install
 
+### Prebuilt binary (Linux x86_64)
+
+Each [release](https://github.com/qhquanghuy/firestore-ctl/releases) has a statically linked
+binary that runs on any x86_64 Linux, with or without Nix. Download the archive and its
+`.sha256`, verify, and put `firectl` on your PATH:
+
+```sh
+version=X.Y.Z   # a version from the releases page
+base=https://github.com/qhquanghuy/firestore-ctl/releases/download/v$version
+curl -fLO $base/firectl-$version-x86_64-unknown-linux-musl.tar.gz
+curl -fLO $base/firectl-$version-x86_64-unknown-linux-musl.tar.gz.sha256
+sha256sum -c firectl-$version-x86_64-unknown-linux-musl.tar.gz.sha256
+tar -xzf firectl-$version-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 firectl-$version-x86_64-unknown-linux-musl/firectl ~/.local/bin/
+```
+
+### Nix
+
 ```sh
 nix build                 # ./result/bin/firectl
 nix develop               # dev shell: rust toolchain, cargo-nextest, firebase-tools, jdk
@@ -250,4 +268,14 @@ The emulator cannot test named databases (it has only `(default)`), index requir
 ```sh
 nix develop -c firebase emulators:exec --only firestore --project demo-firectl \
   'cargo nextest run --test emulator --run-ignored all'
+```
+
+## Releasing
+
+Bump `version` in `Cargo.toml` and commit, then tag and push. Pushing a `v*` tag builds the
+static binary and publishes the release; the workflow fails if the tag is not `v` plus the
+`Cargo.toml` version.
+
+```sh
+git tag vX.Y.Z && git push origin vX.Y.Z
 ```

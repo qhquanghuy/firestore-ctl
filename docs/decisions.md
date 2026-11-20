@@ -143,5 +143,10 @@ Terms: see `glossary.md`.
   clap `///` docs are `--help` text.
 - **Tests never reach real GCP.** CLI tests point at a dead emulator port; the emulator suite refuses
   non-local hosts and uses `demo-` projects.
+- **Releases are cut by pushing a `v*` tag, and ship a static musl binary.** A Nix-built binary links
+  against `/nix/store`, so it runs only where that store exists; the `static` flake package builds a
+  fully static `x86_64-unknown-linux-musl` binary instead (default package unchanged, for Nix users).
+  The tag must equal `v` plus the `Cargo.toml` version, or the release workflow fails. CI builds
+  `.#static` too, so a broken static build is caught before tagging.
 - **Public repo.** History was rewritten before publishing: internal names were removed and authors use a
   noreply email.
