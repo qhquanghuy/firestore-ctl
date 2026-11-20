@@ -9,7 +9,8 @@
 //! | reference | `{"$ref": "teams/t1"}` (relative to the current database) |
 //! | bytes | `{"$bytes": "<standard base64 with padding>"}` |
 //! | geo point | `{"$geo": {"lat": 1.5, "lng": -2.0}}` |
-//! | array, map | JSON array, JSON object |
+//! | array | JSON array (an array directly inside an array is rejected: Firestore forbids it) |
+//! | map | JSON object; a map whose only key starts with `$` is escaped as `{"$map": {...}}` |
 //!
 //! Decoding rules for objects:
 //! * An object with exactly one key that starts with `$` must be a known tag;
@@ -18,14 +19,18 @@
 //! * To keep the round trip exact, a map whose *only* key starts with `$` is
 //!   written as `{"$map": {...}}`; reading `$map` yields that inner object as a map.
 //!
-//! A JSON number with a fraction or exponent decodes as a double, any other as an
-//! integer (an error outside `i64`, never a silent double).
+//! Numbers: an integer literal in `i64` decodes as an integer; a literal with a
+//! fraction or exponent as a double. Never a silent double for an integer: an
+//! integer beyond `i64` is an error, and so is any integral number of magnitude
+//! `>= 2^63` (without arbitrary precision `serde_json` cannot tell a huge integer
+//! literal from an exponent double), so write `{"$double": n}` for such doubles.
+//! `-0` has no integer form and decodes as the double `-0.0`.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::{Map, Number, Value as Json, json};
 
-use super::{CodecError, double_json};
+use super::{CodecError, double_json, fields_to_object};
 use crate::domain::document::Document;
 use crate::domain::value::{Fields, GeoPoint, Timestamp, Value};
 
@@ -49,16 +54,9 @@ pub fn value_to_json(v: &Value) -> Json {
     }
 }
 
-fn fields_to_object(fields: &Fields) -> Map<String, Json> {
-    fields
-        .iter()
-        .map(|(k, v)| (k.clone(), value_to_json(v)))
-        .collect()
-}
-
 /// A map value; escaped as `$map` when it would otherwise look like a tag.
 fn map_to_json(fields: &Fields) -> Json {
-    let object = fields_to_object(fields);
+    let object = fields_to_object(fields, value_to_json);
     if object.len() == 1 && object.keys().all(|k| k.starts_with('$')) {
         json!({"$map": object})
     } else {
@@ -73,7 +71,7 @@ pub fn document_to_json(d: &Document) -> Json {
     json!({
         "_path": d.path.to_string(),
         "_updateTime": d.update_time.to_string(),
-        "data": Json::Object(fields_to_object(&d.data)),
+        "data": Json::Object(fields_to_object(&d.data, value_to_json)),
     })
 }
 
@@ -85,26 +83,44 @@ pub fn value_from_json(j: &Json) -> Result<Value, CodecError> {
     decode(j, "")
 }
 
-/// Reads the fields of a document from `set --data` input: either a bare data
-/// object, or a full document object (recognised by having both `_path` and
-/// `data` keys), in which case only its `data` is used. A bare object that
-/// happens to have both a `_path` and a `data` field is therefore read as a
+/// Reads the fields of a document from `set --data` input.
+///
+/// The input is a *full document* (the shape `get` prints) if it has a `_path`
+/// or `_updateTime` key, or if `data` is its only key; its `data` object is then
+/// required, and any other top-level key is an error rather than being dropped
+/// (fields belong inside `data`). Otherwise the object itself is the bare data.
+/// A bare object whose only field is a map named `data` is therefore read as a
 /// full document.
 ///
 /// # Errors
-/// [`CodecError`] if the input is not an object, `data` is not an object, or a
-/// field fails to decode.
+/// [`CodecError`] if the input is not an object, a full document lacks an object
+/// `data` or has stray top-level keys, or a field fails to decode.
 pub fn fields_from_input(j: &Json) -> Result<Fields, CodecError> {
     let top = j
         .as_object()
         .ok_or_else(|| CodecError::new("", "expected a JSON object"))?;
-    match (top.get("_path"), top.get("data")) {
-        (Some(_), Some(data)) => data
-            .as_object()
-            .ok_or_else(|| CodecError::new("/data", "`data` must be a JSON object"))
-            .and_then(|o| decode_fields(o, "/data")),
-        _ => decode_fields(top, ""),
+    let is_full_document = ["_path", "_updateTime"]
+        .iter()
+        .any(|k| top.contains_key(*k))
+        || (top.len() == 1 && top.contains_key("data"));
+    if !is_full_document {
+        return decode_fields(top, "");
     }
+    if let Some(stray) = top
+        .keys()
+        .find(|k| !matches!(k.as_str(), "_path" | "_updateTime" | "data"))
+    {
+        return Err(CodecError::new(
+            &child("", stray),
+            format!(
+                "unexpected top-level key `{stray}` in a full document; put fields inside `data`"
+            ),
+        ));
+    }
+    top.get("data")
+        .and_then(Json::as_object)
+        .ok_or_else(|| CodecError::new("/data", "a full document needs a `data` object"))
+        .and_then(|data| decode_fields(data, "/data"))
 }
 
 /// Appends one escaped segment (RFC 6901) to a JSON pointer.
@@ -128,7 +144,17 @@ fn decode(j: &Json, at: &str) -> Result<Value, CodecError> {
         Json::Array(xs) => xs
             .iter()
             .enumerate()
-            .map(|(i, x)| decode(x, &child(at, &i.to_string())))
+            .map(|(i, x)| {
+                let here = child(at, &i.to_string());
+                if x.is_array() {
+                    Err(CodecError::new(
+                        &here,
+                        "an array directly inside an array is not allowed by Firestore",
+                    ))
+                } else {
+                    decode(x, &here)
+                }
+            })
             .collect::<Result<Vec<_>, _>>()
             .map(Value::Array),
         Json::Object(o) => match single_entry(o) {
@@ -143,15 +169,27 @@ fn single_entry(o: &Map<String, Json>) -> Option<(&String, &Json)> {
 }
 
 fn decode_number(n: &Number, at: &str) -> Result<Value, CodecError> {
+    // 2^63 as f64: every integral f64 at or beyond it is outside the i64 range.
+    const I64_LIMIT: f64 = 9_223_372_036_854_775_808.0;
     if let Some(i) = n.as_i64() {
-        Ok(Value::Int(i))
-    } else if n.to_string().contains(['.', 'e', 'E']) {
-        finite(n, at).map(Value::Double)
-    } else {
-        Err(CodecError::new(
+        return Ok(Value::Int(i));
+    }
+    let out_of_range = || {
+        CodecError::new(
             at,
-            format!("integer {n} is outside the 64-bit range"),
-        ))
+            format!(
+                "number {n} out of range for an integer; write {{\"$double\": n}} for a double"
+            ),
+        )
+    };
+    if n.is_u64() {
+        return Err(out_of_range());
+    }
+    let f = finite(n, at)?;
+    if f.fract() == 0.0 && f.abs() >= I64_LIMIT {
+        Err(out_of_range())
+    } else {
+        Ok(Value::Double(f))
     }
 }
 

@@ -7,6 +7,8 @@
 use serde_json::Number;
 use thiserror::Error;
 
+use crate::domain::value::{Fields, Value};
+
 pub mod plain_json;
 pub mod typed_json;
 
@@ -27,6 +29,14 @@ impl CodecError {
             reason: reason.into(),
         }
     }
+}
+
+/// Encodes each field with `encode` into a JSON object.
+fn fields_to_object(
+    fields: &Fields,
+    encode: fn(&Value) -> serde_json::Value,
+) -> serde_json::Map<String, serde_json::Value> {
+    fields.iter().map(|(k, v)| (k.clone(), encode(v))).collect()
 }
 
 /// A finite double as a JSON number; NaN and infinities as the strings
@@ -86,6 +96,7 @@ mod tests {
     fn roundtrip_all_types() {
         let fields: Fields = [
             ("s", "x".into()),
+            ("bo", Value::Bool(true)),
             ("i", Value::Int(9_007_199_254_740_993)),
             ("d", Value::Double(1.0)),
             ("t", Value::Timestamp(ts("2026-01-05T10:00:00.123456789Z"))),
@@ -160,6 +171,8 @@ mod tests {
             "18446744073709551616",
             "-9223372036854775809",
             "123456789012345678901234567890",
+            "1e30",
+            "9223372036854775808.0",
         ] {
             let j: serde_json::Value = serde_json::from_str(lit).unwrap();
             assert!(typed_json::value_from_json(&j).is_err(), "{lit}");
@@ -176,9 +189,76 @@ mod tests {
                 "{lit}"
             );
         }
-        let j: serde_json::Value = serde_json::from_str("1e999").unwrap();
+        // serde_json itself refuses non-finite literals.
+        assert!(serde_json::from_str::<serde_json::Value>("1e999").is_err());
+    }
+
+    #[test]
+    fn out_of_range_integer_error_suggests_double_tag() {
+        let j: serde_json::Value = serde_json::from_str("1e30").unwrap();
         let e = typed_json::value_from_json(&j).unwrap_err();
-        assert!(e.reason.contains("not a finite double"), "{}", e.reason);
+        assert!(e.reason.contains(r#"{"$double": n}"#), "{}", e.reason);
+        // below 2^63 an exponent literal is a double
+        let j: serde_json::Value = serde_json::from_str("9e18").unwrap();
+        assert_eq!(typed_json::value_from_json(&j), Ok(Value::Double(9e18)));
+    }
+
+    #[test]
+    fn minus_zero_literal_is_the_double_negative_zero() {
+        let j: serde_json::Value = serde_json::from_str("-0").unwrap();
+        assert!(matches!(
+            typed_json::value_from_json(&j),
+            Ok(Value::Double(z)) if z == 0.0 && z.is_sign_negative()
+        ));
+    }
+
+    #[test]
+    fn nested_arrays_are_rejected_with_a_pointer() {
+        let e = typed_json::value_from_json(&json!({"a": [1, [2]]})).unwrap_err();
+        assert_eq!(e.at, "/a/1");
+        // an array of maps containing arrays is fine
+        assert!(typed_json::value_from_json(&json!([{"x": [1]}])).is_ok());
+    }
+
+    #[test]
+    fn full_document_detection_is_strict() {
+        // _updateTime alone marks a full document; a missing _path is not a flip to bare data
+        let ok = typed_json::fields_from_input(
+            &json!({"_updateTime": "2026-01-01T00:00:00Z", "data": {"a": 1}}),
+        );
+        assert_eq!(ok.unwrap()["a"], Value::Int(1));
+        // data as the only key is a full document
+        assert!(typed_json::fields_from_input(&json!({"data": {"a": 1}})).is_ok());
+        assert_eq!(
+            typed_json::fields_from_input(&json!({"data": 5}))
+                .unwrap_err()
+                .at,
+            "/data"
+        );
+        // stray keys are errors, never dropped
+        for j in [
+            json!({"_path": "teams/t1", "data": {}, "extra": 1}),
+            json!({"_path": "teams/t1", "extra": 1}),
+            json!({"_updateTime": "2026-01-01T00:00:00Z", "extra": {}, "data": {}}),
+        ] {
+            let e = typed_json::fields_from_input(&j).unwrap_err();
+            assert_eq!(e.at, "/extra", "{j}");
+            assert!(
+                e.reason.contains("extra") && e.reason.contains("inside `data`"),
+                "{}",
+                e.reason
+            );
+        }
+        // a full document without data is an error
+        assert_eq!(
+            typed_json::fields_from_input(&json!({"_path": "teams/t1"}))
+                .unwrap_err()
+                .at,
+            "/data"
+        );
+        // otherwise it is bare data, keys kept literally
+        let bare = typed_json::fields_from_input(&json!({"data": 5, "other": 6})).unwrap();
+        assert_eq!(bare.len(), 2);
     }
 
     #[test]

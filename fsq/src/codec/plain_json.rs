@@ -2,11 +2,11 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use serde_json::{Map, Value as Json, json};
+use serde_json::{Value as Json, json};
 
-use super::double_json;
+use super::{double_json, fields_to_object};
 use crate::domain::document::Document;
-use crate::domain::value::{Fields, Value};
+use crate::domain::value::Value;
 
 /// Renders a value without type tags: timestamps, references and bytes (standard
 /// base64) become strings, geo points `{"lat","lng"}`, and non-finite doubles
@@ -24,15 +24,8 @@ pub fn value_to_json(v: &Value) -> Json {
         Value::Ref(p) => Json::String(p.to_string()),
         Value::Geo(g) => json!({"lat": double_json(g.lat()), "lng": double_json(g.lng())}),
         Value::Array(xs) => Json::Array(xs.iter().map(value_to_json).collect()),
-        Value::Map(m) => Json::Object(fields_to_object(m)),
+        Value::Map(m) => Json::Object(fields_to_object(m, value_to_json)),
     }
-}
-
-fn fields_to_object(fields: &Fields) -> Map<String, Json> {
-    fields
-        .iter()
-        .map(|(k, v)| (k.clone(), value_to_json(v)))
-        .collect()
 }
 
 /// Renders a document as `{"_path", "_updateTime", "data"}` with untagged data.
@@ -41,6 +34,6 @@ pub fn document_to_json(d: &Document) -> Json {
     json!({
         "_path": d.path.to_string(),
         "_updateTime": d.update_time.to_string(),
-        "data": Json::Object(fields_to_object(&d.data)),
+        "data": Json::Object(fields_to_object(&d.data, value_to_json)),
     })
 }
