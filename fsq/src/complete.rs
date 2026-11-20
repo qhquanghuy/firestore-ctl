@@ -35,7 +35,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{ArgMatches, CommandFactory};
 use clap_complete::engine::{ArgValueCompleter, CompletionCandidate};
-use clap_complete::env::{Elvish, Fish, Powershell, Shells, Zsh};
+use clap_complete::env::{Shells, Zsh};
 use itertools::Itertools;
 use serde_json::json;
 
@@ -63,11 +63,12 @@ const SAMPLE_SIZE: NonZeroU32 = NonZeroU32::new(20).unwrap();
 /// Deepest nesting offered: `a.b.c` has depth 3.
 const MAX_FIELD_DEPTH: usize = 3;
 
-/// The shells that can be completed: `clap_complete`'s, with bash made safe for field
-/// names that are not plain words (see [`bash`]).
+/// The shells that can be completed: bash (made safe for field names that are not plain
+/// words, see [`bash`]) and zsh. These are the ones `fsq completions` documents
+/// (`CompletionShell`); the others `clap_complete` knows are deliberately not registered.
 #[must_use]
 pub fn shells() -> Shells<'static> {
-    Shells(&[&bash::FsqBash, &Elvish, &Fish, &Powershell, &Zsh])
+    Shells(&[&bash::FsqBash, &Zsh])
 }
 
 /// The line that enables completion in `shell`; what `fsq completions <shell>` prints.

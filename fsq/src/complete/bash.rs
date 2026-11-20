@@ -72,8 +72,9 @@ impl Cursor {
 /// safely: it has a control character, or it is not a plain word and the cursor's quoting
 /// is unknown. Outside quotes it is single-quoted unless it only has plain characters;
 /// inside an open quote only that quote's metacharacters are escaped. `!` (history
-/// expansion, which applies even inside single quotes) is always backslash-escaped from
-/// outside quotes: the quote is closed around it and reopened.
+/// expansion, which applies outside quotes and inside double quotes but not inside single
+/// quotes) is always escaped, to be safe: the open quote is closed around a backslash-escaped
+/// `!` and reopened.
 fn bash_word(candidate: &str, cursor: Cursor) -> Option<String> {
     if candidate.chars().any(char::is_control) {
         return None;
