@@ -1,0 +1,36 @@
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+use serde_json::{Value as Json, json};
+
+use super::{double_json, fields_to_object};
+use crate::domain::document::Document;
+use crate::domain::value::Value;
+
+#[must_use]
+pub fn value_to_json(v: &Value) -> Json {
+    match v {
+        Value::Null => Json::Null,
+        Value::Bool(b) => Json::Bool(*b),
+        Value::Int(i) => Json::from(*i),
+        Value::Double(f) => double_json(*f),
+        Value::String(s) => Json::String(s.clone()),
+        Value::Timestamp(t) => Json::String(t.to_string()),
+        Value::Bytes(b) => Json::String(STANDARD.encode(b)),
+        Value::Ref(p) => Json::String(p.to_string()),
+        Value::ForeignRef(n) => Json::String(n.to_string()),
+        Value::Geo(g) => json!({"lat": double_json(g.lat()), "lng": double_json(g.lng())}),
+        Value::Array(xs) => Json::Array(xs.iter().map(value_to_json).collect()),
+        Value::Map(m) => Json::Object(fields_to_object(m, value_to_json)),
+    }
+}
+
+/// The `_plain` marker makes `set --data` refuse the output: untagged values are lossy.
+#[must_use]
+pub fn document_to_json(d: &Document) -> Json {
+    json!({
+        "_path": d.path.to_string(),
+        "_updateTime": d.update_time.to_string(),
+        "_plain": true,
+        "data": Json::Object(fields_to_object(&d.data, value_to_json)),
+    })
+}

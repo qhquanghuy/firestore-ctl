@@ -1,0 +1,125 @@
+[package]
+name = "firectl"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Query Firestore from the command line"
+publish = false
+
+[lib]
+name = "firectl"
+path = "src/lib.rs"
+
+[[bin]]
+name = "firectl"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = { version = "~4.6", features = ["unstable-dynamic"] }
+comfy-table = "7"
+gcloud-sdk = { version = "0.34", default-features = false, features = [
+    "google-firestore-v1",
+    "google-firestore-admin-v1",
+    "tls-webpki-roots",
+    "jwt-aws-lc-rs",
+    "auth-default-crypto",
+] }
+itertools = "0.15"
+# float_roundtrip: parse JSON doubles exactly (default parsing can be 1 ULP off), so
+# a printed `$double` always reads back bit-identical.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "macros", "time", "process"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+pretty_assertions = "1"
+tempfile = "3.27.0"
+
+[lints.rust]
+warnings = "deny"
+unsafe_code = "forbid"
+missing_debug_implementations = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+unreachable_pub = "deny"
+unused_qualifications = "deny"
+unused_lifetimes = "deny"
+unused_import_braces = "deny"
+unit_bindings = "deny"
+trivial_numeric_casts = "deny"
+redundant_lifetimes = "deny"
+unused_macro_rules = "deny"
+let_underscore_drop = "deny"
+
+[lints.rustdoc]
+all = { level = "deny", priority = -1 }
+missing_crate_level_docs = "allow"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+# No panics: fallible code returns errors.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+dbg_macro = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+get_unwrap = "deny"
+unwrap_in_result = "deny"
+panic_in_result_fn = "deny"
+
+# Only main and render touch stdout/stderr; only main exits.
+print_stdout = "deny"
+print_stderr = "deny"
+use_debug = "deny"
+exit = "deny"
+
+# Suppressions are #[expect(.., reason)] so stale ones fail the build.
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
+# Exhaustive matches and patterns: a new variant or field forces a decision.
+wildcard_enum_match_arm = "deny"
+rest_pat_in_fully_bound_structs = "deny"
+
+# Deterministic output.
+iter_over_hash_type = "deny"
+
+# Clean style.
+mem_forget = "deny"
+clone_on_ref_ptr = "deny"
+str_to_string = "deny"
+string_add = "deny"
+if_then_some_else_none = "deny"
+redundant_type_annotations = "deny"
+needless_raw_strings = "deny"
+map_err_ignore = "deny"
+let_underscore_must_use = "deny"
+return_and_then = "deny"
+use_self = "deny"
+unused_trait_names = "deny"
+mod_module_files = "deny"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+overflow-checks = true
+# panic stays "unwind": completion relies on catch_unwind to stay silent.
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
