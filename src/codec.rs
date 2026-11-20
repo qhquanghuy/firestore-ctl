@@ -532,11 +532,21 @@ mod tests {
             any::<f64>().prop_map(Json::from),
             select(vec![1e30, 9.3e18, -0.0, 1.0, 5e-324, 91.0, -181.0]).prop_map(Json::from),
         ];
+        let tagged = prop_oneof![
+            select(vec!["NaN", "Infinity", "-Infinity"]).prop_map(|s| json!({"$double": s})),
+            Just(json!({"$ts": "2026-01-05T10:00:00.123456789Z"})),
+            Just(json!({"$ref": "teams/t1"})),
+            Just(json!({"$ref": "projects/p/databases/d/documents/users/u1"})),
+            Just(json!({"$bytes": "AP8="})),
+            (-100.0..100.0_f64, -200.0..200.0_f64)
+                .prop_map(|(lat, lng)| json!({"$geo": {"lat": lat, "lng": lng}})),
+        ];
         let leaf = prop_oneof![
             1 => Just(Json::Null),
             1 => any::<bool>().prop_map(Json::Bool),
             3 => numbers,
             3 => strings.prop_map(Json::String),
+            2 => tagged,
         ];
         leaf.prop_recursive(3, 24, 6, |inner| {
             prop_oneof![
@@ -553,6 +563,85 @@ mod tests {
         (prefix, arb::doc_path()).prop_filter_map("a document path", |(prefix, p)| {
             format!("{prefix}{p}").parse().ok()
         })
+    }
+
+    fn walk_json<'a>(j: &'a Json, depth: usize, out: &mut Vec<(usize, &'a Json)>) {
+        out.push((depth, j));
+        match j {
+            Json::Array(xs) => {
+                for x in xs {
+                    walk_json(x, depth + 1, out);
+                }
+            }
+            Json::Object(o) => {
+                for x in o.values() {
+                    walk_json(x, depth + 1, out);
+                }
+            }
+            Json::Null | Json::Bool(_) | Json::Number(_) | Json::String(_) => {}
+        }
+    }
+
+    #[test]
+    fn arbitrary_json_reaches_its_classes() {
+        use proptest::strategy::ValueTree as _;
+        use proptest::test_runner::TestRunner;
+
+        let strategy = arbitrary_json();
+        let mut runner = TestRunner::deterministic();
+        let trees: Vec<Json> = (0..1_000)
+            .map(|_| strategy.new_tree(&mut runner).unwrap().current())
+            .collect();
+        let mut nodes = Vec::new();
+        for tree in &trees {
+            walk_json(tree, 0, &mut nodes);
+        }
+        let reaches = |class: &str, is_member: &dyn Fn(&(usize, &Json)) -> bool| {
+            assert!(nodes.iter().any(is_member), "no sample in class: {class}");
+        };
+        let has_key = |j: &Json, key: &str| j.as_object().is_some_and(|o| o.contains_key(key));
+        reaches("object with an envelope key", &|&(_, j)| {
+            ENVELOPE_KEYS.iter().any(|k| has_key(j, k))
+        });
+        reaches("envelope key beside a data object", &|&(_, j)| {
+            ENVELOPE_KEYS.iter().any(|k| has_key(j, k))
+                && j.get("data").is_some_and(Json::is_object)
+        });
+        reaches("sole tag object", &|&(_, j)| {
+            j.as_object()
+                .is_some_and(|o| o.len() == 1 && o.keys().all(|k| k.starts_with('$')))
+        });
+        reaches("number above i64::MAX", &|&(_, j)| {
+            j.is_u64() && j.as_i64().is_none()
+        });
+        reaches("integral double beyond i64", &|&(_, j)| {
+            j.as_f64()
+                .is_some_and(|f| f.fract() == 0.0 && f.abs() >= 9.2e18)
+        });
+        reaches("array directly inside an array", &|&(_, j)| {
+            j.as_array().is_some_and(|xs| xs.iter().any(Json::is_array))
+        });
+        reaches("string a tag accepts", &|&(_, j)| {
+            matches!(j.as_str(), Some("NaN" | "Infinity" | "-Infinity" | "AP8="))
+        });
+        reaches("object nested two deep", &|&(depth, j)| {
+            depth == 2 && j.is_object()
+        });
+        let decoded: Vec<_> = trees.iter().map(typed_json::parse_input).collect();
+        assert!(decoded.iter().any(Result::is_ok), "no input decodes");
+        assert!(decoded.iter().any(Result::is_err), "no input is rejected");
+        let values: Vec<_> = trees.iter().map(typed_json::value_from_json).collect();
+        assert!(
+            values.iter().any(|v| matches!(v, Ok(Value::Map(_)))),
+            "no object decodes to a map"
+        );
+        assert!(
+            values.iter().any(|v| matches!(
+                v,
+                Ok(Value::Timestamp(_) | Value::Ref(_) | Value::Bytes(_) | Value::Geo(_))
+            )),
+            "no tag decodes"
+        );
     }
 
     proptest! {
