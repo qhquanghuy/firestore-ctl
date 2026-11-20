@@ -264,7 +264,12 @@ zsh, which does not split. Names that need quoting are shell-escaped for you.
 
 ## Tests
 
-Unit and CLI tests need nothing: `cargo nextest run` (inside `nix develop`).
+Unit and CLI tests need nothing: `cargo nextest run` (inside `nix develop`). They include property
+tests (`proptest`) that check laws such as parse-then-print over generated values.
+
+Coverage is report-only (no gate). `cargo llvm-cov nextest --summary-only --ignore-filename-regex 'src/domain/arb\.rs$'`
+prints the table for the tests that run without an emulator. The badge counts the emulator run as well, so
+its number is higher than the local one.
 
 The end-to-end suite in `tests/emulator.rs` runs the real binary against the Firestore
 emulator. Its tests (all but one, which runs anywhere) are `#[ignore]`d, use their own `demo-` projects, and refuse to run

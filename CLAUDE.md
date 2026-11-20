@@ -7,7 +7,7 @@ Rust CLI for Firestore, built for scripts and coding agents. Details: README.md.
 - `cargo clippy --all-targets` (every warning is an error), `cargo fmt`
 - `cargo nextest run`
 - Emulator suite: `firebase emulators:exec --only firestore --project demo-firectl 'cargo nextest run --test emulator --run-ignored all'`
-- Coverage (report-only, no gate): `cargo llvm-cov nextest --summary-only` (unit, CLI, app_flow; the emulator tests are ignored without an emulator), then `cargo llvm-cov report --html` for a report under `target/llvm-cov/html`. For missed lines use `--lcov --output-path <file>`.
+- Coverage (report-only, no gate): `cargo llvm-cov nextest --summary-only --ignore-filename-regex 'src/domain/arb\.rs$'` (unit, CLI, app_flow; the emulator tests are ignored without an emulator), then `cargo llvm-cov report --html` for a report under `target/llvm-cov/html`. For missed lines use `--lcov --output-path <file>`.
 - `nix flake check`: what CI runs (fmt, clippy, rustdoc, tests, build). `git add` new files first; flakes only see tracked files.
 
 ## Layout

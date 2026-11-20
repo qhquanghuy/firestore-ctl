@@ -157,7 +157,8 @@ Terms: see `glossary.md`.
   noreply email.
 - **Coverage is report-only: no percentage gate.** A gate rewards junk tests. CI prints the table into the job
   summary and the number feeds the badge; nothing fails on it. The number counts inline `#[cfg(test)]` code
-  too, so read it as a trend, not a score.
+  too, so read it as a trend, not a score. The test-only generator module `src/domain/arb.rs` is excluded from
+  both `report` calls (`--ignore-filename-regex`), so growing generators does not move the badge.
   - One instrumented run of every test, emulator included (`cargo llvm-cov nextest --run-ignored all` inside
     `firebase emulators:exec`). `nix flake check` stays the gate and does not run coverage.
   - Tooling: `cargo-llvm-cov`, with `LLVM_COV`/`LLVM_PROFDATA` taken from `pkgs.rustc.llvmPackages.llvm`
@@ -168,16 +169,18 @@ Terms: see `glossary.md`.
 - **The coverage badge comes from an orphan `badges` branch, not a third-party service.** On pushes to `main`,
   a `badge` job force-pushes a fresh single-commit tree holding a shields.io endpoint file
   (`coverage.json`) to `badges`, using the built-in `GITHUB_TOKEN`. No Codecov account, no secrets.
-  - The `badge` job is the only one with `contents: write`. It runs no repo code and is skipped on every
+  - In `ci.yml` the `badge` job is the only one with `contents: write` (`release.yml` has its own). It runs
+    no repo code and is skipped on every
     pull request, so no PR run (fork or same-repo) holds a write token. The trigger stays `pull_request`,
     never `pull_request_target`. The coverage job keeps `contents: read` and `persist-credentials: false`.
   - `badges` must stay unprotected (a ruleset over all branches would reject the force-push). The README
     badge reads `raw.githubusercontent.com`, which works only while the repo is public. A newer push can
     cancel an in-flight `badge` job (`cancel-in-progress`); the next run restores the badge.
-- **Property tests use one shared generator module and never persist failures.** Generators live in
-  `src/domain/arb.rs` (test-only) and produce only legal domain values, built through each type's own
-  constructor or parser. Each generator has a fixed-seed test that it reaches every class it claims, so a
-  generator cannot quietly narrow.
+- **Property tests use one shared generator module and never persist failures.** Domain-value generators live
+  in `src/domain/arb.rs` (test-only) and produce only legal domain values, built through each type's own
+  constructor or parser. Generators of input text or JSON (which may be illegal on purpose) sit beside the
+  decoder they feed, because `domain` has no `serde_json`. Every generator has a fixed-seed test that it reaches
+  every class it claims, so a generator cannot quietly narrow.
   - `failure_persistence` is off. The nix build drops `proptest-regressions/`, so replay files would not run on
     CI. A real counterexample becomes a named example test instead.
   - Properties are unit tests next to the code, not in `tests/`: integration tests cannot see test-only helpers.

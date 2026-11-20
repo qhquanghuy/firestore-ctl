@@ -44,18 +44,19 @@ jobs:
           firebase emulators:exec --only firestore --project demo-firectl
           'cargo llvm-cov nextest --run-ignored all --no-report'
       - name: Coverage summary
+        shell: bash
         run: |
           {
             echo '### Coverage (unit, CLI, app_flow and emulator tests)'
             echo
             echo '```'
-            nix develop --command cargo llvm-cov report --summary-only
+            nix develop --command cargo llvm-cov report --summary-only --ignore-filename-regex 'src/domain/arb\.rs$'
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Line coverage for the badge
         id: percent
         run: |
-          nix develop --command cargo llvm-cov report --json --summary-only --output-path "$RUNNER_TEMP/coverage.json"
+          nix develop --command cargo llvm-cov report --json --summary-only --ignore-filename-regex 'src/domain/arb\.rs$' --output-path "$RUNNER_TEMP/coverage.json"
           percent=$(jq -r ".data[0].totals.lines.percent" "$RUNNER_TEMP/coverage.json")
           printf 'line-percent=%.1f\n' "$percent" >> "$GITHUB_OUTPUT"
 
