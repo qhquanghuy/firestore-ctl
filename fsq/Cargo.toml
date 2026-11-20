@@ -17,7 +17,7 @@ path = "src/main.rs"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 clap = { version = "4", features = ["derive", "env"] }
-clap_complete = { version = "4.6", features = ["unstable-dynamic"] }
+clap_complete = { version = "~4.6", features = ["unstable-dynamic"] }
 comfy-table = "7"
 gcloud-sdk = { version = "0.34", default-features = false, features = [
     "google-firestore-v1",
