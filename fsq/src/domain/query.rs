@@ -1,6 +1,11 @@
 //! Query building blocks produced by flag parsing (`--where`, `--order-by`).
 
+use std::num::NonZeroU32;
+
 use super::field::FieldPath;
+use super::ids::CollectionId;
+use super::nonempty::NonEmptyVec;
+use super::path::{CollectionPath, DocPath};
 use super::value::Value;
 use thiserror::Error;
 
@@ -145,6 +150,75 @@ pub struct OrderBy {
     pub field: FieldPath,
     /// The sort direction.
     pub direction: Direction,
+}
+
+/// Where a query looks for documents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    /// The documents directly in one collection.
+    Collection(CollectionPath),
+    /// Every collection named `id` at any depth, optionally only below `parent`.
+    Group {
+        /// Restrict to collections under this document; `None` searches the whole database.
+        parent: Option<DocPath>,
+        /// The collection name matched at any depth.
+        id: CollectionId,
+    },
+}
+
+/// A maximum result count; never zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limit(NonZeroU32);
+
+impl From<NonZeroU32> for Limit {
+    fn from(n: NonZeroU32) -> Self {
+        Self(n)
+    }
+}
+
+impl Limit {
+    /// The count (at least 1).
+    #[must_use]
+    pub fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+/// A fully specified document query.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Query {
+    /// Where to look.
+    pub scope: Scope,
+    /// Conditions every result satisfies (AND).
+    pub filters: Vec<Filter>,
+    /// Sort terms, most significant first.
+    pub order: Vec<OrderBy>,
+    /// Maximum results; `None` for all.
+    pub limit: Option<Limit>,
+    /// Results to skip.
+    pub offset: u32,
+    /// Return only these fields; `None` for whole documents.
+    pub select: Option<Vec<FieldPath>>,
+}
+
+/// One server-side aggregate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Aggregation {
+    /// Number of matching documents.
+    Count,
+    /// Sum of a numeric field.
+    Sum(FieldPath),
+    /// Average of a numeric field.
+    Avg(FieldPath),
+}
+
+/// A query reduced to one or more aggregates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AggregateQuery {
+    /// The documents aggregated over.
+    pub query: Query,
+    /// The aggregates to compute.
+    pub aggregations: NonEmptyVec<Aggregation>,
 }
 
 #[cfg(test)]
