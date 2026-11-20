@@ -36,7 +36,7 @@ const LONG_HELP: &str = r#"Values (--where, --set, lists):
   null  true  false     literals
   18  -3  1.5           numbers (integer or float)
   "text"                quoted string; escapes are \" and \\ only
-  ts:2026-01-05T10:00:00Z   timestamp (RFC 3339, nanoseconds kept)
+  ts:2026-01-05T10:00:00Z   timestamp (RFC 3339; Firestore keeps microseconds)
   ref:users/u1          document reference
   [a, "b c", 3]         list, for `in`, `not-in`, `array-contains-any`, `+=`, `-=`
   anything else         a string. Numbers with leading zeros (007, 0123) stay strings;
@@ -59,7 +59,7 @@ Updating fields (update --set):
 Typed JSON (what `get`/`query` print and `set --data` reads):
   Documents are {"_path": ..., "_updateTime": ..., "data": {...}}. Values that JSON
   cannot express carry a tag:
-  {"$ts": "2026-01-05T10:00:00.123456789Z"}   timestamp
+  {"$ts": "2026-01-05T10:00:00.123456Z"}       timestamp (stored to the microsecond)
   {"$ref": "users/u1"}                         document reference
   {"$double": 1.5}                             double ("NaN", "Infinity" as strings);
                                                a bare JSON integer is an integer
@@ -72,8 +72,8 @@ Typed JSON (what `get`/`query` print and `set --data` reads):
   `get` (its _path must match the target); use --data @file.json or --data - (stdin).
 
 Concurrency:
-  --if-unchanged-since takes the _updateTime printed by `get`, verbatim. The write
-  fails (exit 5) if the document changed or is missing.
+  --if-unchanged-since takes the _updateTime printed by `get`, verbatim (nanoseconds
+  included). The write fails (exit 5) if the document changed or is missing.
 
 Environment:
   FSQ_PROJECT    default for --project
@@ -96,7 +96,7 @@ Exit codes:
   2  usage error (bad flag, path, filter, field op or --data)
   3  not found
   4  already exists
-  5  precondition failed (changed since --if-unchanged-since)
+  5  precondition failed (missing or changed since --if-unchanged-since)
   6  writes disabled for this database
   7  missing index (the error lists the index to create)
   8  authentication or permission failure (login: gcloud auth application-default login;

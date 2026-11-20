@@ -2,10 +2,15 @@
 //!
 //! All tests are ignored by default. Run them with
 //! `firebase emulators:exec --only firestore --project demo-fsq 'cargo nextest run --test emulator --run-ignored all'`.
+//! Each test clears its project through the emulator first, so the suite can be re-run.
 //! Each test uses its own `demo-` project, so tests do not see each other's documents,
 //! and refuses to run unless `FIRESTORE_EMULATOR_HOST` names a local address: these
 //! tests write, and must never reach a real project.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(clippy::expect_used, clippy::panic)]
+
+use std::collections::BTreeSet;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 
 use assert_cmd::Command;
 use pretty_assertions::assert_eq;
@@ -18,9 +23,36 @@ struct Emulator {
 
 /// Whether `host` (a `FIRESTORE_EMULATOR_HOST` value) is a loopback `host:port`.
 fn is_local(host: &str) -> bool {
-    ["localhost:", "127.0.0.1:", "[::1]:"]
-        .iter()
-        .any(|prefix| host.starts_with(prefix))
+    ["localhost:", "127.0.0.1:", "[::1]:"].iter().any(|prefix| {
+        host.strip_prefix(prefix)
+            .is_some_and(|port| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()))
+    })
+}
+
+/// Deletes every document of `project` on the emulator at `host`, so a test starts from
+/// an empty database even when the emulator has run before.
+fn clear_project(host: &str, project: &str) {
+    let request = format!(
+        "DELETE /emulator/v1/projects/{project}/databases/(default)/documents HTTP/1.1\r\n\
+         Host: {host}\r\nConnection: close\r\n\r\n"
+    );
+    let mut stream = TcpStream::connect(host).expect("emulator is reachable");
+    stream
+        .write_all(request.as_bytes())
+        .expect("send clear request");
+    // The emulator keeps the connection open, so stop at the end of the headers.
+    let mut response = Vec::new();
+    let mut chunk = [0_u8; 512];
+    while !response.windows(4).any(|w| w == b"\r\n\r\n") {
+        let n = stream.read(&mut chunk).expect("read clear response");
+        assert!(n > 0, "emulator closed the connection clearing {project}");
+        response.extend_from_slice(&chunk[..n]);
+    }
+    let response = String::from_utf8_lossy(&response);
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "clearing {project} failed: {response}"
+    );
 }
 
 impl Emulator {
@@ -33,9 +65,9 @@ impl Emulator {
             "FIRESTORE_EMULATOR_HOST must be a local host:port (got {host:?}); run these \
              tests through `firebase emulators:exec`"
         );
-        Self {
-            project: format!("demo-fsq-{name}"),
-        }
+        let project = format!("demo-fsq-{name}");
+        clear_project(&host, &project);
+        Self { project }
     }
 
     /// `fsq` pointed at this project, allowed to write to it.
@@ -88,6 +120,18 @@ fn parse(text: &str) -> Json {
     serde_json::from_str(text).unwrap_or_else(|e| panic!("not JSON ({e}): {text}"))
 }
 
+/// The strings of a JSON array, sorted (collection ids come in no particular order).
+fn names(array: &Json) -> Vec<&str> {
+    array
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|v| v.as_str().expect("a string"))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 /// The `_path`s of a JSON array of documents.
 fn paths(docs: &Json) -> Vec<&str> {
     docs.as_array()
@@ -98,13 +142,15 @@ fn paths(docs: &Json) -> Vec<&str> {
 }
 
 #[test]
-#[ignore = "needs FIRESTORE_EMULATOR_HOST"]
-fn refuses_to_run_against_a_non_local_host() {
+fn is_local_accepts_only_loopback() {
     assert!(is_local("localhost:8080"));
     assert!(is_local("127.0.0.1:8080"));
     assert!(is_local("[::1]:8080"));
     assert!(!is_local("firestore.googleapis.com:443"));
     assert!(!is_local("localhost.example.com:8080"));
+    assert!(!is_local("localhost:"));
+    assert!(!is_local("localhost:80/x"));
+    assert!(!is_local("127.0.0.1:80.evil.com:8080"));
     assert!(!is_local(""));
 }
 
@@ -112,9 +158,7 @@ fn refuses_to_run_against_a_non_local_host() {
 #[ignore = "needs FIRESTORE_EMULATOR_HOST"]
 fn typed_document_survives_get_then_set_overwrite() {
     let emu = Emulator::project("roundtrip");
-    emu.create(
-        "things/t1",
-        &json!({
+    let input = json!({
             "name": "widget",
             "count": 7,
             "ratio": {"$double": 1.0},
@@ -128,12 +172,14 @@ fn typed_document_survives_get_then_set_overwrite() {
             "nested": {"a": {"b": [1, {"$double": 2.0}, "x"]}},
             "escaped": {"$map": {"$odd": 1}},
             "tags": ["a", "b", {"$ref": "users/u2"}],
-        }),
-    );
+    });
+    emu.create("things/t1", &input);
 
     let first_text = emu.ok(&["get", "things/t1"]);
     let first = parse(&first_text);
     assert_eq!(first["_path"], "things/t1");
+    // Every value was already canonical, so nothing changed on the way through.
+    assert_eq!(first["data"], input);
     let data = &first["data"];
     assert_eq!(data["count"], 7);
     assert_eq!(data["ratio"], json!({"$double": 1.0}));
@@ -227,7 +273,7 @@ fn guarded_writes_fail_with_precondition_failed_when_stale() {
     emu.fails_with(&["delete", "users/u1", "--if-unchanged-since", &old], 5);
     assert_eq!(emu.json(&["get", "users/u1"])["data"], json!({"n": 2}));
 
-    // The exact timestamp `get` printed is accepted (nanoseconds intact).
+    // The exact `_updateTime` printed by `get` is accepted.
     emu.ok(&[
         "update",
         "users/u1",
@@ -383,7 +429,10 @@ fn collection_group_query_reads_every_depth() {
     );
 
     let below = emu.json(&["query", "--group", "orders", "shops/s2"]);
-    assert_eq!(paths(&below).len(), 2);
+    assert_eq!(
+        paths(&below),
+        ["shops/s2/orders/o2", "shops/s2/stalls/x1/orders/o3"]
+    );
 
     assert_eq!(
         emu.json(&["count", "--group", "orders", "--where", "total > 15"]),
@@ -400,18 +449,11 @@ fn collections_lists_root_and_subcollections() {
     emu.create("users/u1/notes/n1", &json!({"n": 1}));
     emu.create("teams/t1", &json!({"n": 1}));
 
-    let mut below = emu.json(&["collections", "users/u1"]);
-    below
-        .as_array_mut()
-        .expect("array")
-        .sort_by_key(Json::to_string);
-    assert_eq!(below, json!(["notes", "orders"]));
-
-    let mut root = emu.json(&["collections"]);
-    root.as_array_mut()
-        .expect("array")
-        .sort_by_key(Json::to_string);
-    assert_eq!(root, json!(["teams", "users"]));
+    assert_eq!(
+        names(&emu.json(&["collections", "users/u1"])),
+        ["notes", "orders"]
+    );
+    assert_eq!(names(&emu.json(&["collections"])), ["teams", "users"]);
 }
 
 #[test]
@@ -427,4 +469,71 @@ fn writes_are_refused_without_a_matching_writable_entry() {
         .assert()
         .code(1);
     emu.fails_with(&["get", "users/u1"], 3);
+}
+
+#[test]
+#[ignore = "needs FIRESTORE_EMULATOR_HOST"]
+fn a_writable_entry_for_another_project_does_not_allow_writes() {
+    let emu = Emulator::project("other-proj");
+    emu.fsq(&["set", "users/u1", "--data", r#"{"n": 1}"#])
+        .env("FSQ_WRITABLE", "other-proj/(default)")
+        .assert()
+        .code(6);
+    emu.fails_with(&["get", "users/u1"], 3);
+}
+
+#[test]
+#[ignore = "needs FIRESTORE_EMULATOR_HOST"]
+fn set_merge_combines_nested_maps_field_by_field() {
+    let emu = Emulator::project("merge");
+    emu.create(
+        "users/u1",
+        &json!({"address": {"city": "Y", "zip": "1"}, "n": 1}),
+    );
+    emu.ok(&[
+        "set",
+        "users/u1",
+        "--merge",
+        "--data",
+        r#"{"address": {"city": "X"}}"#,
+    ]);
+    let merged = emu.json(&["get", "users/u1"]);
+    assert_eq!(
+        merged["data"],
+        json!({"address": {"city": "X", "zip": "1"}, "n": 1})
+    );
+
+    // A stale guard fails; the exact `_updateTime` printed by `get` succeeds.
+    let stale = merged["_updateTime"]
+        .as_str()
+        .expect("_updateTime")
+        .to_owned();
+    emu.ok(&["update", "users/u1", "--set", "n=2"]);
+    emu.fails_with(
+        &[
+            "set",
+            "users/u1",
+            "--merge",
+            "--data",
+            r#"{"n": 3}"#,
+            "--if-unchanged-since",
+            &stale,
+        ],
+        5,
+    );
+    assert_eq!(emu.json(&["get", "users/u1"])["data"]["n"], 2);
+    let fresh = emu.json(&["get", "users/u1"])["_updateTime"]
+        .as_str()
+        .expect("_updateTime")
+        .to_owned();
+    emu.ok(&[
+        "set",
+        "users/u1",
+        "--merge",
+        "--data",
+        r#"{"n": 3}"#,
+        "--if-unchanged-since",
+        &fresh,
+    ]);
+    assert_eq!(emu.json(&["get", "users/u1"])["data"]["n"], 3);
 }

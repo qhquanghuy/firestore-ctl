@@ -34,8 +34,9 @@ Authentication:
    login from `gcloud auth application-default login`, or a Google-hosted environment).
 2. Otherwise (or if ADC fails) a token from `gcloud auth print-access-token`.
 
-If `FIRESTORE_EMULATOR_HOST` is set, it takes precedence: requests go to that emulator over
-plain HTTP with no Google credentials (project ids like `demo-foo` need no login).
+If `FIRESTORE_EMULATOR_HOST` is set, it takes precedence: requests go to that emulator with
+no Google credentials (project ids like `demo-foo` need no login). A bare `host:port` is
+contacted over plain HTTP; a value with a scheme (`https://...`) is used as given.
 
 Not logged in or expired credentials exit with code 8 and say how to log in.
 
@@ -48,11 +49,14 @@ boundary: whoever controls the environment can set the variable. Set it yourself
 session or per database, rather than in a shared profile. It is not mentioned in `--help`.
 
 ```sh
-export FSQ_WRITABLE='my-project/(default),staging-db'
+export FSQ_WRITABLE='my-project/(default),my-project/staging-db'
 ```
 
-- A comma-separated list of `database` (that database in any project) or
-  `project/database` (exactly that one).
+Prefer exact `project/database` entries. A bare database name matches that database in EVERY
+project you can reach, which is rarely what you mean.
+
+- A comma-separated list of `project/database` (exactly that one) or `database` (that
+  database in any project).
 - The default database must be written `project/(default)`; a bare `(default)` is rejected
   because it would match every project's default database.
 - No wildcards.
@@ -105,6 +109,10 @@ union** and **array remove**, not numeric increment or decrement. `+=` adds the 
 each element of a list) if absent; `-=` removes every occurrence. Each field may be changed
 once per update.
 
+If the field is not an array (or is missing), `+=` and `-=` do not fail: they replace it with
+an array holding the given values (`-=` leaves an empty array). Check the field first when
+that would lose data.
+
 ### Typed JSON
 
 `get`, `query` and `set --data` use `{"_path": ..., "_updateTime": ..., "data": {...}}`
@@ -119,9 +127,17 @@ and tag values JSON cannot express:
 | `{"$geo": {"lat": 1.5, "lng": -2.0}}` | geo point |
 | `{"$map": {...}}` | escape: a map whose only key starts with `$` |
 
-`get` output can be fed straight back to `set --overwrite --data -` (its `_path` must match
-the target). `--plain` prints untagged JSON for humans and `jq`; it cannot be read back
+`set --data` takes a bare object of fields (`{"name": "Ann"}`) or a whole document as
+`get` prints it, which can be fed straight back to `set --overwrite --data -` (its `_path`
+must match the target). With `--merge`, nested maps are merged field by field: only the
+fields you give are changed, siblings (including inside nested maps) are kept. Without
+`--merge`, `--overwrite` replaces the whole document. `--plain` prints untagged JSON for humans and `jq`; it cannot be read back
 losslessly. Firestore stores timestamps with microsecond precision.
+
+### Indexes
+
+`fsq indexes` lists composite indexes through the Firestore Admin API, so it needs credentials
+with the `datastore.indexes.list` permission, and it is not supported by the emulator.
 
 ### Output
 
@@ -184,7 +200,11 @@ Unit and CLI tests need nothing: `cargo nextest run` (inside `nix develop`).
 The end-to-end suite in `tests/emulator.rs` runs the real binary against the Firestore
 emulator. Its tests are `#[ignore]`d, use their own `demo-` projects, and refuse to run
 unless `FIRESTORE_EMULATOR_HOST` is a local address. `firebase.json` configures the
-emulator (port 8080). The first run downloads the emulator jar.
+emulator (port 8080). The first run downloads the emulator jar. Each test clears its own
+project first, so the suite can be re-run against a running emulator.
+
+The emulator cannot test named databases (it has only `(default)`), index requirements
+(it does not enforce composite indexes, so exit 7 is not exercised) or `indexes`.
 
 ```sh
 nix develop -c firebase emulators:exec --only firestore --project demo-fsq \
