@@ -170,8 +170,7 @@ Terms: see `glossary.md`.
   a `badge` job force-pushes a fresh single-commit tree holding a shields.io endpoint file
   (`coverage.json`) to `badges`, using the built-in `GITHUB_TOKEN`. No Codecov account, no secrets.
   - In `ci.yml` the `badge` job is the only one with `contents: write` (`release.yml` has its own). It runs
-    no repo code and is skipped on every
-    pull request, so no PR run (fork or same-repo) holds a write token. The trigger stays `pull_request`,
+    no repo code and is skipped on every pull request, so no PR run (fork or same-repo) holds a write token. The trigger stays `pull_request`,
     never `pull_request_target`. The coverage job keeps `contents: read` and `persist-credentials: false`.
   - `badges` must stay unprotected (a ruleset over all branches would reject the force-push). The README
     badge reads `raw.githubusercontent.com`, which works only while the repo is public. A newer push can
