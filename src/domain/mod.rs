@@ -1,5 +1,3 @@
-//! Pure domain types: identifiers, paths, field paths, values and documents.
-
 pub mod document;
 pub mod field;
 pub mod ids;

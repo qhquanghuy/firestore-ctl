@@ -1,6 +1,3 @@
-//! Parsing of command-line flag syntax into domain values:
-//! typed value tokens, `--where` filters, `--order-by` terms and `--set` field ops.
-
 use thiserror::Error;
 
 use crate::domain::{FieldPath, FieldPathError};
@@ -28,9 +25,6 @@ impl ParseError {
     }
 }
 
-/// Yields `(byte index, char)` for the characters of `s` outside `quote`-delimited
-/// segments. The delimiters and everything between them are skipped; inside a
-/// segment a backslash escapes the next character, so `\<quote>` does not close it.
 pub(crate) fn unquoted(s: &str, quote: char) -> impl Iterator<Item = (usize, char)> + '_ {
     s.char_indices()
         .scan((false, false), move |(in_quote, escaped), (i, c)| {
@@ -59,12 +53,8 @@ pub(crate) fn unquoted(s: &str, quote: char) -> impl Iterator<Item = (usize, cha
         .flatten()
 }
 
-/// Characters that may not appear in an unquoted field name in a flag: they would
-/// make operators, directions or typos parse as part of the name.
 const RESERVED_IN_FIELD: &str = "<>!=+-:";
 
-/// Parses a field path from a flag. `hint` is appended to the rejection error to point at
-/// the likely intended syntax.
 pub(crate) fn parse_field(text: &str, hint: &str) -> Result<FieldPath, String> {
     let text = text.trim();
     match unquoted(text, '`').find(|&(_, c)| c.is_whitespace() || RESERVED_IN_FIELD.contains(c)) {

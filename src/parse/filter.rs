@@ -1,5 +1,3 @@
-//! `--where` filters: `<field> <op> <value>`.
-
 use std::str::FromStr;
 
 use super::{ParseError, parse_field, parse_token, unquoted};
@@ -8,8 +6,6 @@ use crate::domain::{Filter, Op};
 impl FromStr for Filter {
     type Err = ParseError;
 
-    /// Splits at the first whitespace-delimited word that is an operator; the rest is the
-    /// value, parsed as a [token](parse_token).
     fn from_str(s: &str) -> Result<Self, ParseError> {
         let trimmed = s.trim();
         let (field, op, value) = split(trimmed).ok_or_else(|| {

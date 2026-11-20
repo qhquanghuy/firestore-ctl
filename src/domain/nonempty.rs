@@ -1,5 +1,3 @@
-//! A vector that always holds at least one element.
-
 use std::iter;
 
 use thiserror::Error;

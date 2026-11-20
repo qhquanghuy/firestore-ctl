@@ -1,4 +1,3 @@
-//! Shared fixtures for the adapter's unit tests.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use crate::domain::{CollectionPath, DbTarget, DocPath, Filter, Op, Query, Scope, Value};

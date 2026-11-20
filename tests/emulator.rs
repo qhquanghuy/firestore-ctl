@@ -1,11 +1,6 @@
-//! End-to-end tests against the Firestore emulator, driven through the real binary.
-//!
-//! The tests that need the emulator are `#[ignore]`d (`is_local_accepts_only_loopback` is
-//! not and runs everywhere). Run them with
-//! `firebase emulators:exec --only firestore --project demo-firectl 'cargo nextest run --test emulator --run-ignored all'`.
-//! Each test uses its own `demo-` project, cleared first so the suite can be re-run, and
-//! refuses to run unless `FIRESTORE_EMULATOR_HOST` names a local address: these tests write,
-//! and must never reach a real project.
+//! Each test uses its own `demo-` project, cleared first so the suite can be re-run, and refuses to
+//! run unless `FIRESTORE_EMULATOR_HOST` names a local address: these tests write, and must never
+//! reach a real project.
 #![allow(clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeSet;
@@ -115,7 +110,6 @@ fn parse(text: &str) -> Json {
     serde_json::from_str(text).unwrap_or_else(|e| panic!("not JSON ({e}): {text}"))
 }
 
-/// Sorted: collection ids come in no particular order.
 fn names(array: &Json) -> Vec<&str> {
     array
         .as_array()

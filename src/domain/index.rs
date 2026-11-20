@@ -1,5 +1,3 @@
-//! Index advice: which index a query needs and how to create it.
-
 use itertools::Itertools;
 
 use super::field::FieldPath;
@@ -47,8 +45,7 @@ impl QueryScope {
     }
 }
 
-/// A composite index definition. [`required_index`] only produces specs with at least
-/// two fields, the minimum Firestore accepts for a composite index.
+/// At least two fields, the minimum Firestore accepts for a composite index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexSpec {
     pub collection_group: CollectionId,
@@ -59,26 +56,17 @@ pub struct IndexSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexAdvice {
     Composite(IndexSpec),
-    /// A collection-group-scoped single-field index (not created by default, and
-    /// Firestore rejects one-field composite indexes).
     SingleField {
         collection_group: CollectionId,
         field: IndexField,
     },
 }
 
-/// What index `q` needs beyond Firestore's automatic ones, if any.
-///
-/// Candidate fields, each at its first position only: equality filters (`==`, `in`:
-/// ascending; `array-contains[-any]`: array-contains) in filter order; then each `order`
-/// term; then fields of inequality filters not yet present, sorted by path, in the direction
-/// of the last `order` term (ascending if none), as Firestore orders them implicitly.
-/// `__name__` is never a candidate.
-///
-/// Collection scope: a composite needs at least two candidates and one ordering or
-/// inequality (equality-only queries are served by merging single-field indexes).
-/// Collection-group scope has no automatic indexes: two or more candidates give a composite,
-/// exactly one gives [`IndexAdvice::SingleField`].
+/// Candidate fields, each at its first position only: equality filters, then each `order` term,
+/// then inequality fields not yet present, in the direction of the last `order` term (as
+/// Firestore orders them implicitly). `__name__` is never a candidate. Collection scope:
+/// equality-only queries are served by merging single-field indexes, so a composite needs an
+/// ordering or inequality. Collection-group scope has no automatic indexes.
 #[must_use]
 pub fn required_index(q: &Query) -> Option<IndexAdvice> {
     let is_equality = |f: &&Filter| {

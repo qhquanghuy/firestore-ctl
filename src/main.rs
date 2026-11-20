@@ -1,4 +1,3 @@
-//! The `firectl` binary: parse → write policy → authorize → connect → run → print.
 #![allow(clippy::print_stderr)]
 
 use std::io::{self, IsTerminal, Write as _};

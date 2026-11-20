@@ -1,5 +1,3 @@
-//! Field paths (`address.city`, `` `my-field`.x ``) and their Firestore rendering.
-
 use std::fmt;
 use std::str::FromStr;
 
@@ -11,11 +9,7 @@ pub enum FieldPathError {
     #[error("field path must not be empty")]
     Empty,
     #[error("field path `{input}` has an empty segment at position {position}")]
-    EmptySegment {
-        /// The rejected path (for [`FieldPath::from_segments`], the segments joined by `.`).
-        input: String,
-        position: usize,
-    },
+    EmptySegment { input: String, position: usize },
     #[error("field path `{0}` has an unterminated backtick quote")]
     UnterminatedQuote(String),
     #[error("field path `{0}` has an unexpected backtick or text after a quoted segment")]
@@ -26,16 +20,10 @@ pub enum FieldPathError {
     InvalidEscape { input: String, escape: char },
 }
 
-/// A path to a (possibly nested) field: a non-empty list of non-empty segments.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FieldPath(Vec<String>);
 
 impl FieldPath {
-    /// Builds a path from raw segments (e.g. map keys containing dots); no quoting or parsing.
-    ///
-    /// # Errors
-    /// [`FieldPathError::Empty`] if there are no segments, [`FieldPathError::EmptySegment`] if
-    /// any segment is empty.
     pub fn from_segments(
         segments: impl IntoIterator<Item = String>,
     ) -> Result<Self, FieldPathError> {
@@ -48,8 +36,6 @@ impl FieldPath {
         &self.0
     }
 
-    /// Renders for Firestore: segments that are not plain identifiers
-    /// (`[A-Za-z_][A-Za-z0-9_]*`) are backtick-quoted, escaping `` ` `` and `\`.
     #[must_use]
     pub fn to_firestore(&self) -> String {
         self.0.iter().map(|s| quote_if_needed(s)).join(".")
@@ -107,7 +93,6 @@ fn take_segment<'a>(rest: &'a str, input: &str) -> Result<(String, &'a str), Fie
     }
 }
 
-/// Only `` \` `` and `\\` are valid escapes.
 fn take_quoted<'a>(body: &'a str, input: &str) -> Result<(String, &'a str), FieldPathError> {
     let mut out = String::new();
     let mut chars = body.char_indices();
@@ -133,8 +118,6 @@ fn take_quoted<'a>(body: &'a str, input: &str) -> Result<(String, &'a str), Fiel
 impl FromStr for FieldPath {
     type Err = FieldPathError;
 
-    /// Dot-separated segments; wrap a segment in backticks to include dots or
-    /// other punctuation, escaping `` ` `` and `\` with a backslash.
     fn from_str(s: &str) -> Result<Self, FieldPathError> {
         if s.is_empty() {
             return Err(FieldPathError::Empty);

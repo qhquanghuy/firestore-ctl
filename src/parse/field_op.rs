@@ -1,5 +1,3 @@
-//! `--set` field changes: `field=value`, `field+=value|[..]`, `field-=value|[..]`.
-
 use std::str::FromStr;
 
 use super::{ParseError, parse_field, parse_token, unquoted};
@@ -11,8 +9,6 @@ const FIELD_HINT: &str =
 impl FromStr for FieldOp {
     type Err = ParseError;
 
-    /// Splits at the first `=` outside a backtick-quoted field; a `+` or `-` right before it
-    /// (ignoring spaces) makes it an array union or removal. The value may not start with `=`.
     fn from_str(s: &str) -> Result<Self, ParseError> {
         let fail = |reason: String| ParseError::new(s, reason);
         let (eq, _) = unquoted(s, '`').find(|&(_, c)| c == '=').ok_or_else(|| {

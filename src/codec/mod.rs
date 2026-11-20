@@ -1,9 +1,3 @@
-//! Codecs between [`Value`](crate::domain::value::Value) /
-//! [`Document`](crate::domain::document::Document) and JSON.
-//!
-//! * [`typed_json`] is lossless: what `get` prints and `set --data` reads back.
-//! * [`plain_json`] is a one-way, untagged rendering for humans and `jq`.
-
 use serde_json::Number;
 use thiserror::Error;
 
@@ -16,7 +10,6 @@ pub mod typed_json;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{}: {reason}", if at.is_empty() { "(root)" } else { at.as_str() })]
 pub struct CodecError {
-    /// RFC 6901 JSON pointer to the offending JSON node (`""` is the root).
     pub at: String,
     pub reason: String,
 }
@@ -37,8 +30,7 @@ fn fields_to_object(
     fields.iter().map(|(k, v)| (k.clone(), encode(v))).collect()
 }
 
-/// Marks a printed document as a `--select` projection (`"_select": [<field paths>]`);
-/// `set --overwrite` refuses such input because it holds only some of the fields.
+/// `set --overwrite` refuses input carrying this marker: it holds only some of the fields.
 #[must_use]
 pub fn mark_selected(document: serde_json::Value, select: &[FieldPath]) -> serde_json::Value {
     match document {
@@ -55,8 +47,7 @@ pub fn mark_selected(document: serde_json::Value, select: &[FieldPath]) -> serde
     }
 }
 
-/// A finite double as a JSON number; NaN and infinities as the strings `"NaN"`, `"Infinity"`,
-/// `"-Infinity"` (JSON has no such numbers).
+/// NaN and infinities are strings: JSON has no such numbers.
 fn double_json(f: f64) -> serde_json::Value {
     Number::from_f64(f).map_or_else(
         || {
@@ -203,7 +194,6 @@ mod tests {
                 "{lit}"
             );
         }
-        // serde_json itself refuses non-finite literals.
         assert!(serde_json::from_str::<serde_json::Value>("1e999").is_err());
     }
 
@@ -212,7 +202,6 @@ mod tests {
         let j: serde_json::Value = serde_json::from_str("1e30").unwrap();
         let e = typed_json::value_from_json(&j).unwrap_err();
         assert!(e.reason.contains(r#"{"$double": n}"#), "{}", e.reason);
-        // below 2^63 an exponent literal is a double
         let j: serde_json::Value = serde_json::from_str("9e18").unwrap();
         assert_eq!(typed_json::value_from_json(&j), Ok(Value::Double(9e18)));
     }
@@ -235,11 +224,9 @@ mod tests {
 
     #[test]
     fn full_document_detection_is_strict() {
-        // _updateTime alone marks a full document; a missing _path is not a flip to bare data
         let ok =
             fields_from_input(&json!({"_updateTime": "2026-01-01T00:00:00Z", "data": {"a": 1}}));
         assert_eq!(ok.unwrap()["a"], Value::Int(1));
-        // `data` alone is NOT an envelope: it is a field named data
         let field_named_data = fields_from_input(&json!({"data": {"a": 1}})).unwrap();
         assert_eq!(field_named_data.len(), 1);
         assert_eq!(
@@ -333,7 +320,6 @@ mod tests {
 
     #[test]
     fn markers_are_reserved_even_without_a_path_or_update_time() {
-        // `jq 'del(._path, ._updateTime)'` of printed output still says where it came from
         let stripped = typed_json::parse_input(&json!({
             "_plain": true,
             "_select": ["a"],
@@ -390,7 +376,6 @@ mod tests {
 
     #[test]
     fn doubles_roundtrip_bit_exact_through_text() {
-        // xorshift-generated bit patterns, finite only
         let bits = std::iter::successors(Some(0x9E37_79B9_7F4A_7C15_u64), |x| {
             let a = x ^ (x << 13);
             let b = a ^ (a >> 7);

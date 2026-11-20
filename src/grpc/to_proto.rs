@@ -1,5 +1,4 @@
-//! Domain types to Firestore protos. Pure; every resource name is built from the
-//! [`DbTarget`] so no request can fall back to `(default)`.
+//! Every resource name is built from the [`DbTarget`] so no request can fall back to `(default)`.
 
 use std::collections::HashMap;
 
@@ -26,8 +25,6 @@ use crate::domain::{
 };
 use crate::port::GatewayError;
 
-/// A domain value as a proto value; relative references become full resource names in `t`,
-/// and a foreign reference is written verbatim.
 pub fn value(v: &Value, t: &DbTarget) -> proto::Value {
     let value_type = match v {
         Value::Null => ValueType::NullValue(prost_types::NullValue::NullValue as i32),
@@ -240,9 +237,6 @@ fn guarded(guard: Guard, default: Option<ConditionType>) -> Option<proto::Precon
     }
 }
 
-/// # Errors
-/// [`GatewayError::Other`] if a merged document has an empty field name, which has no field
-/// path.
 pub fn write(w: &Write, t: &DbTarget) -> Result<proto::Write, GatewayError> {
     match w {
         Write::Set(s) => set(s, t),
@@ -273,8 +267,7 @@ fn set(s: &SetDoc, t: &DbTarget) -> Result<proto::Write, GatewayError> {
     })
 }
 
-/// Every leaf of `data`: scalars, arrays and empty maps (non-empty maps are descended
-/// into). Always a mask, even an empty one: a missing mask would replace the document.
+/// Always a mask, even an empty one: a missing mask would replace the document.
 fn merge_mask(data: &Fields) -> Result<proto::DocumentMask, GatewayError> {
     fn leaves(prefix: &[String], data: &Fields) -> Vec<Vec<String>> {
         data.iter()
@@ -340,8 +333,6 @@ fn array_transform(op: &FieldOp, t: &DbTarget) -> Option<FieldTransform> {
     })
 }
 
-/// Stores `v` at `segments` below `fields`, sharing intermediate maps with earlier
-/// inserts (`a.b` then `a.c` yield one map `a` holding both).
 fn insert_nested(fields: &mut HashMap<String, proto::Value>, segments: &[String], v: proto::Value) {
     match segments {
         [] => {}
@@ -750,7 +741,6 @@ mod tests {
 
     #[test]
     fn transform_only_update_still_sends_an_empty_mask() {
-        // A missing mask would replace the whole document.
         let w = write(
             &update(
                 vec![FieldOp::ArrayUnion(

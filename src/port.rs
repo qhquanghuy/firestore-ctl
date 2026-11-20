@@ -1,6 +1,3 @@
-//! The Firestore port: the only trait in the crate. The real gRPC adapter and the
-//! test fake both implement it; the rest of the program is generic over it.
-
 use thiserror::Error;
 
 use crate::domain::{
@@ -92,9 +89,9 @@ pub trait Firestore {
 
     async fn list_indexes(&self, c: &CollectionId) -> Result<Vec<IndexInfo>, GatewayError>;
 
-    /// Applies `w` atomically to `access.target()`; an implementation connected to a different
-    /// database must refuse the write. Firestore cannot combine `exists` with `update_time`, so a
-    /// guard replaces the existence check. Every implementation enforces:
+    /// An implementation connected to a different database must refuse the write. Firestore cannot
+    /// combine `exists` with `update_time`, so a guard replaces the existence check. Every
+    /// implementation enforces:
     /// - `Set` with `SetMode::Create`: the document must not exist, else
     ///   [`GatewayError::AlreadyExists`].
     /// - `Set` with `Overwrite` or `Merge` and `Guard::None`: no precondition (upsert).

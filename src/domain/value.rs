@@ -1,5 +1,3 @@
-//! Firestore values: the typed data model shared by parsing, codecs and rendering.
-
 use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
@@ -9,7 +7,6 @@ use thiserror::Error;
 
 use super::path::DocPath;
 
-/// A point in time with nanosecond precision (what Firestore stores).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp(DateTime<Utc>);
 
@@ -19,7 +16,6 @@ impl Timestamp {
         Self(at)
     }
 
-    /// `nanos` must be in `0..=999_999_999`, as in the Firestore protos.
     #[must_use]
     pub fn from_unix(seconds: i64, nanos: u32) -> Option<Self> {
         DateTime::from_timestamp(seconds, nanos).map(Self)
@@ -56,7 +52,6 @@ impl FromStr for Timestamp {
     }
 }
 
-/// A document's last-modified time; also the precondition value of guarded writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UpdateTime(Timestamp);
 
@@ -101,8 +96,6 @@ pub struct GeoPoint {
 }
 
 impl GeoPoint {
-    /// # Errors
-    /// [`GeoPointError`] if `lat` is outside `[-90, 90]` or `lng` outside `[-180, 180]`.
     pub fn new(lat: f64, lng: f64) -> Result<Self, GeoPointError> {
         if !(-90.0..=90.0).contains(&lat) {
             Err(GeoPointError::Latitude(lat))
@@ -130,8 +123,6 @@ impl GeoPoint {
 )]
 pub struct ResourceNameError(String);
 
-/// A document's full resource name (`projects/P/databases/D/documents/users/u1`), as Firestore
-/// stores references. [`Value::ForeignRef`] holds the ones outside the database being read.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DocResourceName(String);
 
@@ -176,9 +167,7 @@ pub enum Value {
     String(String),
     Timestamp(Timestamp),
     Bytes(Vec<u8>),
-    /// A reference within the database being read.
     Ref(DocPath),
-    /// A reference into another database or project, kept as its full resource name.
     ForeignRef(DocResourceName),
     Geo(GeoPoint),
     Array(Vec<Value>),

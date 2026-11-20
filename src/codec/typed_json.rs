@@ -1,30 +1,13 @@
-//! Lossless typed JSON: the format `get` prints and `set --data` reads back.
+//! Typed JSON is lossless: what `get` prints is what `set --data` reads back. Format: README.
 //!
-//! | Firestore | JSON |
-//! |---|---|
-//! | null, bool, string | as is |
-//! | integer | JSON integer (never passes through `f64`) |
-//! | double | `{"$double": 1.5}`; NaN/infinities `{"$double": "NaN" \| "Infinity" \| "-Infinity"}` |
-//! | timestamp | `{"$ts": "2026-01-05T10:00:00.123456789Z"}` (RFC 3339, full nanoseconds) |
-//! | reference | `{"$ref": "teams/t1"}` (relative to the current database); in another database, its full resource name `{"$ref": "projects/p/databases/d/documents/teams/t1"}` |
-//! | bytes | `{"$bytes": "<standard base64 with padding>"}` |
-//! | geo point | `{"$geo": {"lat": 1.5, "lng": -2.0}}` |
-//! | array | JSON array (an array directly inside an array is rejected: Firestore forbids it) |
-//! | map | JSON object; a map whose only key starts with `$` is escaped as `{"$map": {...}}` |
-//!
-//! Decoding rules for objects:
-//! * An object with exactly one key that starts with `$` must be a known tag;
-//!   an unknown one is an error (a typo must not silently become a map).
-//! * Objects with several keys are plain maps, even if one key starts with `$`.
-//! * To keep the round trip exact, a map whose *only* key starts with `$` is
-//!   written as `{"$map": {...}}`; reading `$map` yields that inner object as a map.
-//!
-//! Numbers: an integer literal in `i64` decodes as an integer; a literal with a
-//! fraction or exponent as a double. Never a silent double for an integer: an
-//! integer beyond `i64` is an error, and so is any integral number of magnitude
-//! `>= 2^63` (without arbitrary precision `serde_json` cannot tell a huge integer
-//! literal from an exponent double), so write `{"$double": n}` for such doubles.
-//! `-0` has no integer form and decodes as the double `-0.0`.
+//! - Integers never pass through `f64`. A number is an integer only if it is an `i64` literal;
+//!   any integral number of magnitude `>= 2^63` is an error (without arbitrary precision
+//!   `serde_json` cannot tell a huge integer from an exponent double), so write `{"$double": n}`.
+//!   `-0` has no integer form and decodes as the double `-0.0`.
+//! - Doubles are always tagged, so a double never reads back as an integer.
+//! - An object with one `$` key must be a known tag: a typo must not silently become a map.
+//!   A map whose only key starts with `$` is written `{"$map": {...}}` to keep the round trip exact.
+//! - An array directly inside an array is rejected: Firestore forbids it.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -56,7 +39,6 @@ pub fn value_to_json(v: &Value) -> Json {
     }
 }
 
-/// A map value; escaped as `$map` when it would otherwise look like a tag.
 fn map_to_json(fields: &Fields) -> Json {
     let object = fields_to_object(fields, value_to_json);
     if object.len() == 1 && object.keys().all(|k| k.starts_with('$')) {
@@ -66,8 +48,7 @@ fn map_to_json(fields: &Fields) -> Json {
     }
 }
 
-/// Encodes a document as `{"_path", "_updateTime", "data"}`; `data` holds the fields
-/// unescaped, unlike a map value.
+/// `data` holds the fields unescaped, unlike a map value.
 #[must_use]
 pub fn document_to_json(d: &Document) -> Json {
     json!({
@@ -77,8 +58,6 @@ pub fn document_to_json(d: &Document) -> Json {
     })
 }
 
-/// # Errors
-/// [`CodecError`] pointing at the first invalid node.
 pub fn value_from_json(j: &Json) -> Result<Value, CodecError> {
     decode(j, "")
 }
@@ -86,7 +65,6 @@ pub fn value_from_json(j: &Json) -> Result<Value, CodecError> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Input {
     pub fields: Fields,
-    /// `None` for bare data.
     pub envelope: Option<Envelope>,
 }
 
@@ -94,24 +72,14 @@ pub struct Input {
 pub struct Envelope {
     pub path: Option<DocPath>,
     pub update_time: Option<UpdateTime>,
-    /// `_plain` was present: the input is `--plain` output, which is lossy.
     pub plain: bool,
     pub select: Option<Vec<FieldPath>>,
 }
 
-/// Reads `set --data` input. It is a *full document* (the shape `get` prints) only if it has
-/// `_path` or `_updateTime`: `data` is then required, and any other top-level key besides the
-/// markers `_plain` and `_select` is an error, not dropped. Anything else is bare data, so
-/// `{"data": {...}}` alone is a document with one field named `data`.
-///
-/// The markers are reserved top-level keys wherever they appear and are reported in the
-/// [`Envelope`], never as fields (to store a field named `_plain` or `_select`, use the
-/// full-document form and put it inside `data`).
-///
-/// # Errors
-/// [`CodecError`] if the input is not an object, a full document lacks an object `data`, has
-/// stray top-level keys or a malformed `_path`, `_updateTime` or `_select`, or a field fails
-/// to decode.
+/// A *full document* only if it has `_path` or `_updateTime` (then `data` is required and any other
+/// top-level key besides the `_plain`/`_select` markers is an error, not dropped); anything else
+/// is bare data, so `{"data": {...}}` alone is a field named `data`. The markers are reserved
+/// top-level keys: to store a field named so, use the full-document form and put it in `data`.
 pub fn parse_input(j: &Json) -> Result<Input, CodecError> {
     let top = j
         .as_object()
@@ -351,9 +319,7 @@ fn decode_geo(inner: &Json, at: &str) -> Result<Value, CodecError> {
         .map_err(|e| CodecError::new(at, e.to_string()))
 }
 
-/// A `$ref` value: a full resource name (`projects/...`, a reference into another
-/// database) or a document path relative to the current database. The two never
-/// overlap: a resource name has an odd number of segments, a document path an even one.
+/// A resource name has an odd number of segments, a document path an even one, so the two never overlap.
 fn decode_ref(s: &str, at: &str) -> Result<Value, CodecError> {
     if let Some(name) = s
         .starts_with("projects/")

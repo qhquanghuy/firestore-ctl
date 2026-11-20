@@ -1,5 +1,3 @@
-//! Query building blocks produced by flag parsing (`--where`, `--order-by`).
-
 use std::num::NonZeroU32;
 
 use super::field::FieldPath;
@@ -64,8 +62,6 @@ impl Op {
     }
 }
 
-/// One `<field> <op> <value>` condition. The value is a non-empty list exactly
-/// when the operator [takes a list](Op::takes_list); [`Filter::new`] enforces it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Filter {
     field: FieldPath,
@@ -84,9 +80,6 @@ pub enum FilterError {
 }
 
 impl Filter {
-    /// # Errors
-    /// [`FilterError`] if `value` is not a list for a list operator, is a list for any other
-    /// operator, or is an empty list.
     pub fn new(field: FieldPath, op: Op, value: Value) -> Result<Self, FilterError> {
         match (&value, op.takes_list()) {
             (Value::Array(items), true) if items.is_empty() => Err(FilterError::EmptyList(op)),
@@ -127,15 +120,12 @@ pub struct OrderBy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
     Collection(CollectionPath),
-    /// Every collection named `id` at any depth, optionally only below `parent`.
     Group {
-        /// Restrict to collections under this document; `None` searches the whole database.
         parent: Option<DocPath>,
         id: CollectionId,
     },
 }
 
-/// A maximum result count; never zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limit(NonZeroU32);
 
@@ -155,7 +145,6 @@ impl Limit {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
     pub scope: Scope,
-    /// Conditions every result satisfies (AND).
     pub filters: Vec<Filter>,
     pub order: Vec<OrderBy>,
     pub limit: Option<Limit>,

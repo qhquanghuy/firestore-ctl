@@ -1,5 +1,3 @@
-//! Connection setup: endpoint, credentials and routing headers.
-
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -27,7 +25,7 @@ use crate::port::GatewayError;
 const GOOGLE_URL: &str = "https://firestore.googleapis.com";
 const STEP_TIMEOUT: Duration = Duration::from_secs(10);
 const CHANNEL_TIMEOUT: Duration = Duration::from_secs(5);
-/// Applies to a whole stream, start to last message.
+/// Covers a whole stream, start to last message.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 const ROUTING_HEADER: &str = "x-goog-request-params";
 
@@ -42,7 +40,6 @@ pub enum Endpoint {
     Google,
 }
 
-/// The emulator when `FIRESTORE_EMULATOR_HOST` is set and non-empty, else production.
 pub fn endpoint(env: impl Fn(&str) -> Option<String>) -> Endpoint {
     env("FIRESTORE_EMULATOR_HOST")
         .map(|host| host.trim().to_owned())
@@ -56,8 +53,7 @@ pub fn endpoint(env: impl Fn(&str) -> Option<String>) -> Endpoint {
         })
 }
 
-/// An `x-goog-request-params` entry: `key=value`, percent-encoded the way Google's own
-/// clients do (`/` kept).
+/// Percent-encoded the way Google's own clients do (`/` kept).
 pub fn routing_param(key: &str, value: &str) -> String {
     let encoded: String = value
         .bytes()
@@ -92,7 +88,7 @@ fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
         .join(": ")
 }
 
-/// A fixed `Authorization: Bearer` header; the token never appears in `Debug` output.
+/// The token never appears in `Debug` output.
 struct StaticBearer {
     tag: EntityTag,
     headers: HeaderMap,
@@ -150,7 +146,6 @@ impl CredentialsProvider for StaticBearer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CredentialFailure {
     reason: String,
-    /// The failure looks like a network problem rather than a rejected or missing login.
     network: bool,
 }
 
@@ -174,8 +169,8 @@ async fn within<T>(
     })
 }
 
-/// Application Default Credentials, with a token fetched up front so a missing or
-/// expired login is reported here, as an auth failure, rather than inside the first call.
+/// Token fetched up front so a missing or expired login is reported here, as an auth failure,
+/// rather than inside the first call.
 async fn adc_headers() -> Result<GoogleAuthHeaders, CredentialFailure> {
     let headers = GoogleAuthHeaders::from_adc()
         .await
@@ -187,9 +182,8 @@ async fn adc_headers() -> Result<GoogleAuthHeaders, CredentialFailure> {
     Ok(headers)
 }
 
-/// What `gcloud auth print-access-token` failure with this `stderr` means: the `ERROR:`
-/// line (the rest is warnings and how-tos) as the reason, and a network problem when it
-/// reads like one, so a flaky connection is not reported as a bad login.
+/// The `ERROR:` line is the reason (the rest is warnings and how-tos); a network-looking one is
+/// flagged so a flaky connection is not reported as a bad login.
 fn gcloud_failure(stderr: &str) -> CredentialFailure {
     const NETWORK_HINTS: [&str; 8] = [
         "unable to connect",
@@ -236,18 +230,15 @@ async fn gcloud_headers() -> Result<GoogleAuthHeaders, CredentialFailure> {
         .map_err(|e| CredentialFailure::rejected(e.to_string()))
 }
 
-/// The login file `gcloud auth application-default login` writes, at the one place
-/// google-cloud-auth reads it (`$HOME/.config/gcloud`; `CLOUDSDK_CONFIG` is ignored).
+/// google-cloud-auth reads only `$HOME/.config/gcloud`; `CLOUDSDK_CONFIG` is ignored.
 fn well_known_adc_file(env: &impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
     env("HOME")
         .filter(|home| !home.trim().is_empty())
         .map(|home| PathBuf::from(home).join(".config/gcloud/application_default_credentials.json"))
 }
 
-/// Whether google-cloud-auth would find ADC (it reads exactly these places): a key file named
-/// by `GOOGLE_APPLICATION_CREDENTIALS`, the well-known login file, or a Google-hosted
-/// environment (whose metadata server is not probed, so trying ADC elsewhere would only wait
-/// on a server that is not there).
+/// Mirrors where google-cloud-auth looks. The metadata server of a Google-hosted environment is
+/// not probed: trying ADC elsewhere would only wait on a server that is not there.
 fn adc_available(
     env: impl Fn(&str) -> Option<String>,
     is_file: impl Fn(&Path) -> bool,
@@ -270,8 +261,7 @@ fn on_gce() -> bool {
         .is_ok_and(|name| name.trim().starts_with("Google"))
 }
 
-/// The error for a failed credential `source`: [`GatewayError::Auth`], unless it failed for
-/// network reasons, in which case the login may be fine and it is [`GatewayError::Other`].
+/// A network failure says nothing about the login, so it is `Other`, not `Auth`.
 fn credentials_error(source: CredentialSource, failure: &CredentialFailure) -> GatewayError {
     let detail = format!("{}: {}", source.name(), failure.reason);
     if failure.network {
@@ -283,9 +273,8 @@ fn credentials_error(source: CredentialSource, failure: &CredentialFailure) -> G
     }
 }
 
-/// Where Google credentials come from. Exactly one source is tried: a failing
-/// Application Default Credentials login is reported, never papered over with whatever
-/// identity `gcloud` happens to hold.
+/// Exactly one source is tried: a failing ADC login is reported, never papered over with
+/// whatever identity `gcloud` happens to hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CredentialSource {
     Adc,
@@ -320,12 +309,8 @@ async fn google_headers() -> Result<GoogleAuthHeaders, GatewayError> {
 }
 
 /// Every request carries `google-cloud-resource-prefix: projects/P/databases/D`, and no call
-/// (stream included) may take longer than [`CALL_TIMEOUT`].
-///
-/// # Errors
-/// [`GatewayError::Auth`] if no credentials work; [`GatewayError::Other`] if Firestore (or
-/// Google's token endpoint) cannot be reached. Takes at most 15 seconds: the credential
-/// source gets ten, the channel five.
+/// (stream included) may take longer than [`CALL_TIMEOUT`]. Opening takes at most 15 seconds:
+/// the credential source gets ten, the channel five.
 pub async fn open(
     t: &DbTarget,
     endpoint: &Endpoint,

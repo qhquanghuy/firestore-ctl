@@ -1,8 +1,3 @@
-//! The command-line surface: [`Cli`] is what `clap` parses, [`Cli::into_request`] turns
-//! it into an [`app::Request`](crate::app::Request). Flag values are parsed into domain
-//! types by their `FromStr` impls, so a malformed path, filter or field op is a usage
-//! error (exit 2) before anything runs.
-
 use std::convert::Infallible;
 use std::fs;
 use std::io::Read;
@@ -143,11 +138,6 @@ pub struct ConnArgs {
 }
 
 impl ConnArgs {
-    /// Flags first, then `FIRECTL_PROJECT` / `FIRECTL_DATABASE` from `env` (empty counts as unset), then
-    /// `(default)` for the database. `None` when no project is given anywhere.
-    ///
-    /// # Errors
-    /// A message naming the variable when its value is not a valid id.
     pub fn target(&self, env: impl Fn(&str) -> Option<String>) -> Result<Option<DbTarget>, String> {
         fn resolve<T: FromStr<Err = IdError> + Clone>(
             flag: Option<&T>,
@@ -255,8 +245,7 @@ impl FromStr for DataArg {
     }
 }
 
-/// A field path from a flag, as strict as in `--where`: an unquoted name may not contain
-/// whitespace or `< > ! = + - :`, so a typo like `name age` is an error, not one field.
+/// Strict like `--where`: `name age` is an error, not one field.
 fn strict_field(text: &str) -> Result<FieldPath, String> {
     parse_field(
         text,
@@ -264,8 +253,6 @@ fn strict_field(text: &str) -> Result<FieldPath, String> {
     )
 }
 
-/// A comma-separated list of field paths (`--select a,b.c`); commas inside backticks
-/// do not split.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldList(Vec<FieldPath>);
 
@@ -462,8 +449,6 @@ impl Cmd {
 }
 
 impl Cmd {
-    /// A `query` that took the default document limit (neither `--limit` nor `--all`), so its
-    /// result may have been cut short without the user asking.
     #[must_use]
     pub fn uses_default_limit(&self) -> bool {
         matches!(
@@ -477,8 +462,6 @@ impl Cmd {
     }
 }
 
-/// The stderr note for a default-limit `query` ([`Cmd::uses_default_limit`]) that returned
-/// exactly that many documents, so there may be more.
 #[must_use]
 pub fn truncation_note(default_limit_used: bool, output: &Output) -> Option<String> {
     match output {
@@ -535,9 +518,7 @@ fn check_markers(envelope: &Envelope, merge: bool) -> Result<(), AppError> {
     }
 }
 
-/// The data `set --data` writes to `target`. A full document's `_path` must name the
-/// target, so data copied from another document is not written here by accident; its
-/// `_plain` and `_select` markers are checked against `merge` (see [`check_markers`]).
+/// A full document's `_path` must name the target, so data copied from another document is not written here by accident.
 fn decode_data(text: &str, target: &DocPath, merge: bool) -> Result<SetData, AppError> {
     let json: Json = serde_json::from_str(text)
         .map_err(|e| AppError::Input(format!("--data is not valid JSON: {e}")))?;
@@ -573,7 +554,6 @@ fn query(selection: Selection) -> Result<Query, AppError> {
     })
 }
 
-/// Count, then sums, then averages; a field named twice for the same aggregate is an error.
 fn aggregations(
     sum: Vec<FieldPath>,
     avg: Vec<FieldPath>,
@@ -597,10 +577,6 @@ fn aggregations(
 
 impl Cli {
     /// `stdin` is read only by `set --data -`.
-    ///
-    /// # Errors
-    /// [`AppError::Input`] for input that parses but is wrong (bad `--data`, a path of the wrong
-    /// kind, a repeated `--sum`/`--avg` field), and for `completions`, which is not a request.
     pub fn into_request(self, stdin: impl Read) -> Result<Request, AppError> {
         match self.cmd {
             Cmd::Get { path } => Ok(Request::Get(path)),
@@ -640,8 +616,7 @@ impl Cli {
             } => {
                 let SetData { fields, read_at } =
                     read_data(data, stdin).and_then(|text| decode_data(&text, &path, merge))?;
-                // Lost-update protection: a document read with `get` guards its own
-                // write-back unless the caller named a guard or asked to --force.
+                // Lost-update guard: a document read with `get` guards its own write-back unless a guard or --force is given.
                 let guard = guard(if_unchanged_since.or(read_at.filter(|_| !force)));
                 let mode = match (overwrite, merge) {
                     (true, _) => SetMode::Overwrite(guard),

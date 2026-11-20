@@ -1,5 +1,3 @@
-//! Collection and document paths (`users/a/orders/o1`), parsed into a typed chain.
-
 use std::fmt;
 use std::str::FromStr;
 
@@ -12,15 +10,10 @@ pub enum PathError {
     #[error("path must not be empty")]
     Empty,
     #[error("path `{input}` has an empty segment at position {position}")]
-    EmptySegment {
-        input: String,
-        /// Zero-based segment position, after removing one leading and one trailing `/`.
-        position: usize,
-    },
+    EmptySegment { input: String, position: usize },
     #[error("path `{input}` has an invalid segment at position {position}: {source}")]
     InvalidSegment {
         input: String,
-        /// Zero-based segment position, after removing one leading and one trailing `/`.
         position: usize,
         source: IdError,
     },
@@ -44,9 +37,7 @@ pub struct DocPath {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AnyPath {
-    /// An odd number of segments: `users`, `users/a/orders`.
     Collection(CollectionPath),
-    /// An even number of segments: `users/a`.
     Doc(DocPath),
 }
 
@@ -132,8 +123,6 @@ fn segment<T: FromStr<Err = IdError>>(
 impl FromStr for AnyPath {
     type Err = PathError;
 
-    /// Segments alternate `collection/doc/collection/...`. At most one leading
-    /// and one trailing `/` are removed; any other empty segment is an error.
     fn from_str(s: &str) -> Result<Self, PathError> {
         let trimmed = s.strip_prefix('/').unwrap_or(s);
         let trimmed = trimmed.strip_suffix('/').unwrap_or(trimmed);

@@ -1,5 +1,3 @@
-//! Write building blocks: field changes from `--set` flags and whole-document writes.
-
 use itertools::Itertools;
 use thiserror::Error;
 
@@ -8,13 +6,10 @@ use super::nonempty::NonEmptyVec;
 use super::path::DocPath;
 use super::value::{Fields, UpdateTime, Value};
 
-/// One field change from a `field=value`, `field+=value` or `field-=value` flag.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldOp {
     Set(FieldPath, Value),
-    /// Add the elements to the array field, skipping ones already present.
     ArrayUnion(FieldPath, Vec<Value>),
-    /// Remove every occurrence of the elements from the array field.
     ArrayRemove(FieldPath, Vec<Value>),
 }
 
@@ -35,11 +30,8 @@ impl FieldOp {
     }
 }
 
-/// Firestore rejects a field changed twice (a set and an array change included) and a map
-/// changed together with a field inside it (`a` with `a.b`).
-///
-/// # Errors
-/// [`WriteError::Overlap`] naming the first conflicting pair.
+/// Firestore rejects a field changed twice (a set and an array change included) and a map changed
+/// together with a field inside it (`a` with `a.b`).
 pub fn check_field_ops(ops: &NonEmptyVec<FieldOp>) -> Result<(), WriteError> {
     let overlaps = |a: &FieldPath, b: &FieldPath| {
         a.segments().starts_with(b.segments()) || b.segments().starts_with(a.segments())
@@ -78,8 +70,6 @@ impl Guard {
 pub enum SetMode {
     Create,
     Overwrite(Guard),
-    /// Merge the given fields into the document, creating it if missing. With
-    /// [`Guard::UnchangedSince`] a missing document fails the precondition instead.
     Merge(Guard),
 }
 
@@ -120,8 +110,6 @@ impl Write {
         }
     }
 
-    /// The update time the document must still have, if guarded. `Create` has no guard (it
-    /// requires the document to be absent).
     #[must_use]
     pub fn guard(&self) -> Option<&UpdateTime> {
         match self {

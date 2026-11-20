@@ -1,24 +1,10 @@
-//! Dynamic shell completion (`FIRECTL_COMPLETE=<shell> firectl`): collection ids and field names are
-//! looked up in the addressed database while the user presses TAB.
+//! Best effort, must never get in the way: no candidates on any failure, nothing printed (stdout
+//! is the completion protocol), Firestore only read, and a failure is cached for [`FAILURE_TTL`] so
+//! an offline user is slowed down once a minute at most.
 //!
-//! Completion must never get in the way, so every completer here is best effort:
-//! - it returns no candidates on any failure (no project, no credentials, timeout, ...);
-//! - it prints nothing itself (stdout is the completion protocol);
-//! - it only reads Firestore; its only side effect is writing the cache files;
-//! - it gives up after [`DEADLINE`], connecting included, and after a failure does not try
-//!   again for [`FAILURE_TTL`], so an offline user is slowed down once a minute at most.
-//!
-//! The database and collection come from the words already typed, then from `FIRECTL_PROJECT` /
-//! `FIRECTL_DATABASE`. Answers are cached for [`CACHE_TTL`] under
-//! `$XDG_CACHE_HOME/firectl/<project>/<database>/` (`~/.cache` when unset).
-//!
-//! # Reliance on `clap_complete` internals
-//! This is built on `clap_complete`'s `unstable-dynamic` feature, which is why the crate
-//! pins `clap_complete = "~4.6"`. Besides its public API we depend on the layout its shell
-//! scripts use to call the binary: the words after a `--` argument, the position of the
-//! word being completed in `_CLAP_COMPLETE_INDEX`, the separator in `_CLAP_IFS`, and the
-//! text of the bash registration script (patched in [`bash`]). Re-check all of them, and
-//! the tests that cover them, before moving the pin.
+//! Built on `clap_complete`'s `unstable-dynamic` internals (hence the `~4.6` pin): the words after
+//! `--`, `_CLAP_COMPLETE_INDEX`, `_CLAP_IFS` and the text of the bash registration script (patched
+//! in [`bash`]). Re-check them, and the tests covering them, before moving the pin.
 
 mod bash;
 
@@ -46,9 +32,8 @@ use crate::grpc;
 use crate::parse::unquoted;
 use crate::port::Firestore;
 
-/// The environment variable that turns `firectl` into a completion helper (`FIRECTL_COMPLETE=zsh
-/// firectl` prints the registration script). Not the `clap_complete` default, `COMPLETE`: a
-/// stray `COMPLETE` in someone's environment must not hijack the program.
+/// Not the `clap_complete` default `COMPLETE`: a stray `COMPLETE` in someone's environment must
+/// not hijack the program.
 pub const COMPLETE_VAR: &str = "FIRECTL_COMPLETE";
 
 const DEADLINE: Duration = Duration::from_secs(2);
@@ -57,8 +42,6 @@ const FAILURE_TTL: Duration = Duration::from_mins(1);
 const SAMPLE_SIZE: NonZeroU32 = NonZeroU32::new(20).unwrap();
 const MAX_FIELD_DEPTH: usize = 3;
 
-/// bash (made safe for field names that are not plain words, see [`bash`]) and zsh: the
-/// shells `firectl completions` documents; the others `clap_complete` knows are not registered.
 #[must_use]
 pub fn shells() -> Shells<'static> {
     Shells(&[&bash::FirectlBash, &Zsh])
@@ -89,7 +72,6 @@ pub enum FieldKind {
     Where,
     OrderBy,
     Select,
-    /// `--sum`, `--avg`, `--set`: the field name alone (`--set`'s `=value` is not completed).
     Single,
 }
 
@@ -109,10 +91,8 @@ pub fn field_completer(kind: FieldKind) -> ArgValueCompleter {
     })
 }
 
-/// The candidates `complete` finds, or none if it finds nothing or panics. A panic must not
-/// print its message in a release build: stderr is the user's terminal mid-typing. Debug
-/// builds (and so the test suite) keep it. The process exits right after completing, so the
-/// silenced hook is not restored.
+/// A panic must not print its message in a release build: stderr is the user's terminal mid-typing.
+/// Debug builds (and so the tests) keep it. The process exits right after, so the hook is not restored.
 fn silently(
     complete: impl FnOnce() -> Option<Vec<CompletionCandidate>>,
 ) -> Vec<CompletionCandidate> {
@@ -124,8 +104,6 @@ fn silently(
         .unwrap_or_default()
 }
 
-/// Every key, and the keys of nested maps (as dotted paths) down to depth
-/// [`MAX_FIELD_DEPTH`]. Arrays are not descended into.
 #[must_use]
 pub fn field_names(docs: &[Document]) -> BTreeSet<FieldPath> {
     docs.iter()
@@ -153,10 +131,8 @@ struct Invocation {
     target: Option<DbTarget>,
     scope: Option<Scope>,
     cache_base: Option<PathBuf>,
-    /// The Firestore emulator in use (`FIRESTORE_EMULATOR_HOST`): its data is not the
-    /// database's, so it is cached apart.
+    /// Emulator data is not the database's, so it is cached apart.
     emulator: Option<String>,
-    /// The cursor word is the tail of one the shell cut at `:` or `=`, see [`Typed::detached`].
     detached: bool,
 }
 
@@ -198,13 +174,10 @@ impl Invocation {
 
 #[derive(Debug, PartialEq, Eq)]
 struct Typed {
-    /// The words after the program name's `--` marker, with the word at the cursor replaced by
-    /// an empty one (so a flag before it still gets its value and later words are still read).
+    /// The cursor word is replaced by an empty one, so a flag before it still gets its value.
     words: Vec<String>,
-    /// Whether the shell cut the cursor word off the word before it at a `:` or `=`
-    /// (bash breaks words at those characters: `--order-by age:d` arrives as `age`, `:`,
-    /// `d`). The command parser then takes the tail for an argument of its own, so it
-    /// is no collection or field name.
+    /// bash splits words at `:` and `=` (`--order-by age:d` arrives as `age`, `:`, `d`); the tail is
+    /// then an argument of its own, not a collection or field name.
     detached: bool,
 }
 
@@ -230,8 +203,7 @@ fn typed_words(args: impl Iterator<Item = String>, index: Option<usize>) -> Type
     }
 }
 
-/// Undoes bash's splitting of `--project=p` into `--project`, `=`, `p` (and likewise
-/// at `:`) by gluing a lone `=` or `:` and the word after it to the word before.
+/// bash splits `--project=p` into `--project`, `=`, `p` (likewise at `:`); glue them back.
 fn rejoin_split_words(words: Vec<String>) -> Vec<String> {
     words
         .into_iter()
@@ -254,9 +226,8 @@ fn rejoin_split_words(words: Vec<String>) -> Vec<String> {
         .0
 }
 
-/// The command line grammar with every value left as text and no complaints about
-/// missing or malformed arguments: the line being completed is unfinished, and one
-/// bad word must not hide the rest.
+/// Values stay text and nothing errors: the line is unfinished, and one bad word must not hide
+/// the rest.
 fn lenient_command() -> clap::Command {
     fn as_text(cmd: clap::Command) -> clap::Command {
         cmd.mut_args(|arg| {
@@ -309,9 +280,8 @@ fn collection_candidates(
         .collect()
 }
 
-/// Candidates for the word `current` of the flag value `kind`. zsh hands over the word
-/// with the quote it was opened with (`'age >`); the quote is ignored, and left out of the
-/// candidates: the shell matches them against the text inside the quote and keeps it open.
+/// zsh hands over the word with the quote it was opened with; the quote is left out of the
+/// candidates because the shell matches them against the text inside the quote.
 fn field_candidates(
     inv: &Invocation,
     kind: FieldKind,
@@ -347,7 +317,6 @@ fn field_candidates(
         .collect()
 }
 
-/// Matches as written or without the quoting, so that `my` finds `` `my-field` ``.
 fn names_field(field: &str, typed: &str) -> bool {
     field.starts_with(typed)
         || FieldPath::from_str(field)
@@ -363,11 +332,7 @@ fn directions(typed: &str) -> impl Iterator<Item = String> + '_ {
 
 #[derive(Debug, PartialEq, Eq)]
 enum FieldPosition<'a> {
-    /// A field name starting with `typed`, after `kept` (the earlier items of a `--select a,b,`).
-    Field {
-        kept: &'a str,
-        typed: &'a str,
-    },
+    Field { kept: &'a str, typed: &'a str },
     Literal(Vec<String>),
     Nothing,
 }
@@ -378,8 +343,6 @@ fn ends_field(c: char) -> bool {
     c.is_whitespace() || FIELD_BREAKS.contains(c)
 }
 
-/// Where in the flag value the cursor is. Only the field part is completed; after it,
-/// `--where` gets operators, `--order-by` gets `asc`/`desc`, anything else gets nothing.
 fn field_position(kind: FieldKind, current: &str) -> FieldPosition<'_> {
     let last_comma = unquoted(current, '`')
         .filter(|&(_, c)| c == ',')
@@ -450,8 +413,7 @@ fn fetch_fields(target: &DbTarget, scope: &Scope) -> Option<Vec<String>> {
     })
 }
 
-/// Runs `lookup` on a private single-threaded runtime (completion runs before the
-/// program's own runtime exists), giving up after [`DEADLINE`].
+/// Private runtime: completion runs before the program's own exists.
 fn within_deadline<T>(lookup: impl Future<Output = Option<T>>) -> Option<T> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -481,8 +443,6 @@ impl Entry {
     }
 }
 
-/// Answers of earlier lookups for one database, one JSON file per question. Entries
-/// carry the time they were written, so staleness is a pure function of the clock.
 #[derive(Debug)]
 struct Cache {
     dir: PathBuf,
@@ -491,7 +451,6 @@ struct Cache {
 }
 
 impl Cache {
-    /// `<base>/firectl/<project>/<database>`, below `emulator-<host>` for an emulator.
     fn new(base: &Path, target: &DbTarget, emulator: Option<&str>) -> Self {
         let database = base
             .join("firectl")
@@ -510,9 +469,7 @@ impl Cache {
         self.dir.join(format!("{name}.json"))
     }
 
-    /// What is stored under `name`, unless it is older than its time to live or stamped
-    /// in the future (a clock that went backwards, or a damaged file: either way not to
-    /// be trusted).
+    /// Entries stamped in the future (clock went backwards, or a damaged file) are not trusted.
     fn read(&self, name: &str, now: SystemTime) -> Option<Entry> {
         let entry: serde_json::Value =
             serde_json::from_slice(&fs::read(self.file(name)).ok()?).ok()?;
@@ -531,8 +488,7 @@ impl Cache {
         })?
     }
 
-    /// Stores `entry` under `name`, stamped `now`. Failing to write is not an error: the
-    /// cache only saves time. The directories are private to the user.
+    /// Failing to write is not an error: the cache only saves time.
     fn write(&self, name: &str, now: SystemTime, entry: &Entry) {
         let written = unix_seconds(now);
         let body = match entry {
@@ -561,9 +517,8 @@ fn cache_base(env: &impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
     absolute("XDG_CACHE_HOME").or_else(|| absolute("HOME").map(|home| home.join(".cache")))
 }
 
-/// `text` as one file name component: everything but ASCII letters, digits and `_` is
-/// written as `%XX` (per UTF-8 byte). Injective, so different texts never share a name,
-/// and free of `/`, `.`, `-` and `~`, which the names built from it use as separators.
+/// Injective, so different texts never share a name, and free of `/`, `.`, `-` and `~`, which
+/// the names built from it use as separators.
 fn escape_name(text: &str) -> String {
     text.bytes().fold(String::new(), |mut out, b| {
         if b.is_ascii_alphanumeric() || b == b'_' {
@@ -575,9 +530,6 @@ fn escape_name(text: &str) -> String {
     })
 }
 
-/// The cache entry name for the fields of `scope`: `fields-c-<collection path>`, or
-/// `fields-g-<id>[-<parent document>]` for a collection group; the parts are
-/// [escaped](escape_name).
 fn fields_cache_name(scope: &Scope) -> String {
     let part = |text: &dyn ToString| escape_name(&text.to_string());
     match scope {
@@ -590,9 +542,7 @@ fn fields_cache_name(scope: &Scope) -> String {
     }
 }
 
-/// The items cached under `name`, else what `fetch` finds (which is then cached). A
-/// failed lookup is cached too, briefly: there is nothing to offer, and asking again on
-/// every TAB would cost a full timeout each time.
+/// A failed lookup is cached too, briefly: asking again on every TAB would cost a full timeout each time.
 fn cached(
     cache: Option<&Cache>,
     name: &str,
@@ -663,7 +613,7 @@ mod tests {
         Vec::new()
     }
 
-    /// The lookups of tests: none succeeds and none touches a real service.
+    /// Tests must never reach a real service.
     fn no_collections(_: &DbTarget) -> Option<Vec<String>> {
         None
     }
@@ -958,7 +908,6 @@ mod tests {
     #[test]
     fn bash_split_words_are_rejoined_and_the_split_is_reported() {
         let typed = |line: &str, index| typed_words(words(line).into_iter(), index);
-        // `--project=p query users --order-by age:d`, bash style.
         let split = typed(
             "firectl -- firectl --project = p query users --order-by age : d",
             Some(9),
@@ -1335,8 +1284,6 @@ mod tests {
             inv.cache().unwrap().read(&name, at(200)),
             Some(found(&["only_in_emulator"]))
         );
-        // The same database without the emulator, and another emulator, have their own
-        // caches, which hold nothing of it. (Only the caches are looked at: no lookup.)
         let root = dir.path().display().to_string();
         let in_dir = |emulator: Option<&'static str>| {
             let root = root.clone();

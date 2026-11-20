@@ -1,5 +1,3 @@
-//! The central flow: [`Request`] → write authorization → Firestore port → [`Output`].
-
 use thiserror::Error;
 
 use crate::domain::{
@@ -24,7 +22,6 @@ pub enum Output {
     Document(Document),
     Documents {
         docs: Vec<Document>,
-        /// The selected field paths; the documents hold only these fields.
         select: Option<Vec<FieldPath>>,
     },
     Aggregate(AggregateResult),
@@ -61,8 +58,7 @@ pub struct Context {
     pub policy: WritePolicy,
 }
 
-/// A [`Request`] cleared to run, obtainable only from [`authorize`]. A write carries its
-/// [`WriteAccess`], so [`run`] cannot be handed an unauthorized write.
+/// Obtainable only from [`authorize`], so [`run`] cannot be handed an unauthorized write.
 #[derive(Debug)]
 pub struct Authorized(Cleared);
 
@@ -76,8 +72,6 @@ enum Cleared {
     Write(Write, WriteAccess),
 }
 
-/// # Errors
-/// [`AppError::WritesDisabled`] if `req` is a write and the target is not writable.
 pub fn authorize(ctx: &Context, req: Request) -> Result<Authorized, AppError> {
     match req {
         Request::Write(w) => ctx
@@ -94,11 +88,6 @@ pub fn authorize(ctx: &Context, req: Request) -> Result<Authorized, AppError> {
     .map(Authorized)
 }
 
-/// Executes an authorized request; returns a value, never prints.
-///
-/// # Errors
-/// [`AppError::NotFound`] for `get` of a missing document, [`AppError::MissingIndex`] for a
-/// query lacking an index, otherwise [`AppError::Gateway`].
 pub async fn run<F: Firestore>(fs: &F, req: Authorized) -> Result<Output, AppError> {
     match req.0 {
         Cleared::Write(w, access) => fs

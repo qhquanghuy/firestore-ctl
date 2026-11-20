@@ -1,15 +1,11 @@
-//! gRPC statuses to [`GatewayError`]. Pure.
-
 use gcloud_sdk::tonic::{Code, Status};
 
 use super::connect::CALL_TIMEOUT;
 use crate::domain::{DocPath, Write};
 use crate::port::GatewayError;
 
-/// Classifies a failed RPC. `path` is the document the call was about (`None` for queries
-/// and listings); it names a missing or already-existing *document*. A failed precondition
-/// is classified by [`write_error`] (it depends on the write's guard); elsewhere it is a
-/// missing index only if its message says so.
+/// A failed precondition is classified by [`write_error`] (it depends on the write's guard); elsewhere it
+/// is a missing index only if its message says so.
 #[must_use]
 pub fn map_status(s: &Status, path: Option<&DocPath>) -> GatewayError {
     let message = s.message();
@@ -39,12 +35,10 @@ pub fn map_status(s: &Status, path: Option<&DocPath>) -> GatewayError {
     }
 }
 
-/// The failure of committing `w`.
-///
-/// A guarded write needs the document to exist with the guarded update time, and
-/// Firestore reports a missing or changed document as `FAILED_PRECONDITION` or `NOT_FOUND`:
-/// both are [`GatewayError::PreconditionFailed`]. Without a guard, `FAILED_PRECONDITION`
-/// is not the document's doing and `NOT_FOUND` means the document is missing.
+/// A guarded write needs the document to exist with the guarded update time, and Firestore reports a
+/// missing or changed document as `FAILED_PRECONDITION` or `NOT_FOUND`: both are
+/// [`GatewayError::PreconditionFailed`]. Without a guard, `FAILED_PRECONDITION` is not the document's
+/// doing and `NOT_FOUND` means the document is missing.
 #[must_use]
 pub fn write_error(s: &Status, w: &Write) -> GatewayError {
     let precondition = || GatewayError::PreconditionFailed(w.path().clone());
@@ -57,8 +51,8 @@ pub fn write_error(s: &Status, w: &Write) -> GatewayError {
     }
 }
 
-/// Whether a `NOT_FOUND` message is about the database or project rather than a document.
-/// Document messages quote the document's resource name, which contains `/documents/`.
+/// Document messages quote the document's resource name, which contains `/documents/`; database
+/// and project ones do not.
 fn names_missing_database(message: &str) -> bool {
     let lower = message.to_lowercase();
     lower.contains("does not exist") && !lower.contains("/documents/")

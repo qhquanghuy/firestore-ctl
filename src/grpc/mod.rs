@@ -1,9 +1,4 @@
-//! The gRPC adapter for the Firestore port, over raw `gcloud-sdk` protos.
-//!
-//! Every request names its database (`google-cloud-resource-prefix` on the connection,
-//! `x-goog-request-params` per call), so a named database is never replaced by
-//! `(default)`. Conversion lives in the pure [`to_proto`], [`from_proto`] and [`errors`]
-//! modules; this one only moves messages.
+//! Every request names its database, so a named one is never replaced by `(default)`.
 
 mod connect;
 mod errors;
@@ -29,13 +24,6 @@ use crate::port::{AggregateResult, Firestore, GatewayError, IndexInfo, Written};
 
 use self::errors::{map_status, write_error};
 
-/// Connects to `t`: the emulator when `FIRESTORE_EMULATOR_HOST` is set, else production with
-/// Application Default Credentials (or a `gcloud` token when no ADC source exists). Connecting
-/// takes at most 15 seconds; every later call, streams included, is capped at 60.
-///
-/// # Errors
-/// [`GatewayError::Auth`] if no credentials work, [`GatewayError::Other`] if Firestore or
-/// Google's token endpoint cannot be reached.
 pub async fn connect(t: &DbTarget) -> Result<GrpcFirestore, GatewayError> {
     let endpoint = connect::endpoint(|name| std::env::var(name).ok());
     connect::open(t, &endpoint).await.map(|data| GrpcFirestore {
@@ -69,8 +57,6 @@ fn read_error(s: &Status) -> GatewayError {
     map_status(s, None)
 }
 
-/// Every item of a paginated listing. `fetch` gets a page token (empty for the first
-/// page) and returns that page's items with the next token (empty after the last page).
 async fn collect_pages<T, Fut>(fetch: impl Fn(String) -> Fut) -> Result<Vec<T>, GatewayError>
 where
     Fut: Future<Output = Result<(Vec<T>, String), GatewayError>>,
@@ -310,8 +296,6 @@ mod tests {
 
     #[tokio::test]
     async fn write_refuses_a_grant_for_another_database() {
-        // A bound socket nobody accepts on: connecting succeeds, and the write must be
-        // refused before any request is sent.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint =
             connect::Endpoint::Emulator(format!("http://{}", listener.local_addr().unwrap()));

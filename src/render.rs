@@ -1,4 +1,3 @@
-//! Rendering: turns an [`Output`] or [`AppError`] into the exact text to print.
 //! Pure: no I/O, no environment; `main` prints the returned strings.
 
 use std::iter;
@@ -42,8 +41,6 @@ pub struct RenderOpts {
 }
 
 impl RenderOpts {
-    /// A table on a terminal and JSON otherwise; JSON indented on a terminal and compact
-    /// otherwise. `jsonl` is always compact.
     #[must_use]
     pub fn resolve(
         is_tty: bool,
@@ -66,7 +63,6 @@ impl RenderOpts {
     }
 }
 
-/// Every line, the last included, ends with `\n`; an empty `jsonl` result is the empty string.
 #[must_use]
 pub fn render(o: &Output, opts: &RenderOpts) -> String {
     match opts.format {
@@ -90,14 +86,8 @@ pub fn render(o: &Output, opts: &RenderOpts) -> String {
     }
 }
 
-/// Text for stderr; ends with `\n` like [`render`]. The message once, plus what to do about
-/// it: for a missing index the `gcloud` command (composite) or a description (single-field,
-/// no safe command) and the console link; for an authentication failure the login command;
-/// for a permission failure a pointer to IAM. Every variant is listed, so a new one forces a
-/// decision here.
-///
-/// Messages can carry server or stored text, so control characters are shown as escape
-/// sequences, as in tables.
+/// Every variant is listed, so a new one forces a decision here. Messages can carry server or
+/// stored text, so control characters are shown as escape sequences, as in tables.
 #[must_use]
 pub fn render_error(e: &AppError, t: &DbTarget) -> String {
     let message = e.to_string();
@@ -138,8 +128,8 @@ pub fn render_error(e: &AppError, t: &DbTarget) -> String {
         .collect()
 }
 
-/// A single-field index gets a description, not a command: `gcloud ... fields update
-/// --index` would replace the field's other indexes.
+/// A single-field index gets a description, not a command: `gcloud ... fields update --index`
+/// would replace the field's other indexes.
 fn index_help(
     message: String,
     advice: Option<&IndexAdvice>,
@@ -226,9 +216,6 @@ fn object(entries: Vec<(String, Json)>) -> Json {
     Json::Object(entries.into_iter().collect::<Map<_, _>>())
 }
 
-/// `count`, `sum_<field>` and `avg_<field>` keys in request order (a table keeps that order;
-/// JSON objects print keys sorted). The field is its raw segments joined by `.`, without
-/// Firestore's backtick quoting.
 fn aggregate_entries(r: &AggregateResult, typing: Typing) -> Vec<(String, Json)> {
     r.entries()
         .map(|(aggregation, value)| {
@@ -306,8 +293,6 @@ fn grid(o: &Output) -> Grid {
     }
 }
 
-/// `_path`, `_updateTime` (what `--if-unchanged-since` needs), then the union of the
-/// documents' top-level keys (first-seen order).
 fn documents_grid(ds: &[Document]) -> Grid {
     let columns: Vec<&String> = ds.iter().flat_map(|d| d.data.keys()).unique().collect();
     Grid {
@@ -824,7 +809,6 @@ mod tests {
             "{out}"
         );
         assert_eq!(&lines[3..], ["open:", "https://console/idx"]);
-        // the only mention of the command is the warning against it
         assert!(!out.contains("create the index with:"), "{out}");
         assert!(!out.contains("--project"), "{out}");
     }

@@ -1,16 +1,9 @@
-//! Typed value tokens: `null`, `true`, `18`, `1.5`, `ts:…`, `ref:…`, `"quoted"`, `[a, b]`.
-
 use itertools::Itertools;
 
 use super::{ParseError, unquoted};
 use crate::domain::{DocPath, Timestamp, Value};
 
-/// Anything not recognised as a typed token is a string. A `[...]` token yields
-/// [`Value::Array`]; callers decide whether a list is acceptable.
-///
-/// # Errors
-/// [`ParseError`] for a malformed `ts:`/`ref:` token, quoted string or list, or an
-/// integer/float that does not fit.
+/// Anything not recognised as a typed token is a string.
 pub fn parse_token(s: &str) -> Result<Value, ParseError> {
     match s {
         "null" => Ok(Value::Null),
@@ -39,7 +32,6 @@ pub fn parse_token(s: &str) -> Result<Value, ParseError> {
     }
 }
 
-/// Reads a quoted string body (after the opening `"`); `\"` and `\\` are the only escapes.
 fn quoted(token: &str, body: &str) -> Result<String, ParseError> {
     let mut out = String::new();
     let mut chars = body.char_indices();
@@ -98,10 +90,8 @@ fn list(token: &str, inner: &str) -> Result<Vec<Value>, ParseError> {
         .collect()
 }
 
-/// `Some` when `s` is shaped like a number: a canonical integer (`0`, `-5`, `42`: no
-/// leading `+` or zeros, which would be lost) or a float (digits with a `.` and/or
-/// exponent). Anything else is not a number (`None`, so a string); a number-shaped
-/// token that cannot be represented is an error.
+/// Only a canonical integer (no leading `+` or zeros, which would be lost) or a float is a number;
+/// a number-shaped token that cannot be represented is an error, not a string.
 fn number(s: &str) -> Option<Result<Value, ParseError>> {
     if s.starts_with('+') {
         return None;
@@ -182,7 +172,6 @@ mod tests {
         ] {
             assert_eq!(parse_token(s), Ok(Value::String(s.into())), "{s:?}");
         }
-        // unrepresentable: an error, not a silent string
         assert!(parse_token("99999999999999999999").is_err());
         assert!(parse_token("1e999").is_err());
     }

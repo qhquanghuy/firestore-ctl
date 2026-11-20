@@ -1,12 +1,8 @@
-//! bash support for dynamic completion: `clap_complete`'s bash adapter, except that the
-//! candidates it prints are made safe to insert into a command line.
-//!
-//! bash inserts a candidate exactly as printed, so a field name such as `` `my-field` `` (a
-//! command substitution) or one with spaces, `$`, `;` or `!` would change the line's meaning,
-//! and a name from a document is attacker-controlled. Escaping needs to know whether the
-//! cursor is inside an open quote, which bash does not tell a completion function, so the
-//! registration script is patched to pass the line up to the cursor in [`LINE_VAR`]. Without
-//! it only plain words are offered: the escaping fails closed.
+//! `clap_complete`'s bash adapter, except that candidates are made safe to insert: bash inserts a
+//! candidate exactly as printed, and a field name from a document is attacker-controlled (`` `x` `` is
+//! a command substitution). Escaping needs to know whether the cursor is inside an open quote, which
+//! bash does not tell a completion function, so the registration script is patched to pass the line
+//! up to the cursor in [`LINE_VAR`]. Without it only plain words are offered: escaping fails closed.
 
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -18,8 +14,7 @@ use itertools::Itertools;
 
 const LINE_VAR: &str = "_FIRECTL_COMP_LINE";
 
-/// The line of `clap_complete`'s bash script after which [`LINE_VAR`] is passed. A unit
-/// test fails if a `clap_complete` upgrade changes it.
+/// Anchor in `clap_complete`'s bash script; a unit test fails if an upgrade changes it.
 const ANCHOR: &str = "_CLAP_COMPLETE_INDEX=\"$_CLAP_COMPLETE_INDEX\" \\\n";
 
 fn is_plain(c: char) -> bool {
@@ -46,8 +41,6 @@ impl Cursor {
                         (Self::Single, false, '\'') | (Self::Double, false, '"') => {
                             (Self::Bare, false)
                         }
-                        // Anything else, including the character after a backslash, changes
-                        // nothing.
                         _ => (open, false),
                     }
                 })
@@ -56,11 +49,9 @@ impl Cursor {
     }
 }
 
-/// `None` if the candidate has a control character, or is not a plain word and the cursor's
-/// quoting is unknown. Outside quotes it is single-quoted unless plain; inside an open quote
-/// only that quote's metacharacters are escaped. `!` (history expansion: active outside
-/// quotes and inside double quotes) is always escaped by closing the open quote around a
-/// backslash-escaped `!` and reopening it.
+/// `None` if the candidate has a control character, or is not a plain word and the cursor's quoting
+/// is unknown. `!` (history expansion, active outside quotes and inside double quotes) is always
+/// escaped by closing the open quote around a backslash-escaped `!` and reopening it.
 fn bash_word(candidate: &str, cursor: Cursor) -> Option<String> {
     if candidate.chars().any(char::is_control) {
         return None;
@@ -95,9 +86,7 @@ fn bash_words<'a>(
         .collect()
 }
 
-/// `script`, `clap_complete`'s bash registration, passing the command line up to the
-/// cursor to the binary. A script this does not recognise is returned as it is: it works,
-/// and without the line only plain candidates are offered.
+/// A script this does not recognise is returned as is: only plain candidates are then offered.
 fn with_line_passed(script: &str) -> String {
     script.replace(
         ANCHOR,
@@ -275,8 +264,6 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
-    /// The escaped word, evaluated by a real bash in the context it was escaped for, is the
-    /// candidate again.
     #[test]
     fn escaped_words_round_trip_through_bash() {
         let Ok(bash) = std::process::Command::new("bash").arg("--version").output() else {
@@ -332,8 +319,6 @@ mod tests {
 
     #[test]
     fn an_unrecognised_script_is_left_as_it_is() {
-        // The anchor is gone: nothing is patched, so no line will be passed, so only plain
-        // words get offered (see `an_unknown_cursor_offers_plain_words_only`).
         let other = "_other() { :; }\ncomplete -F _other firectl\n";
         assert_eq!(with_line_passed(other), other);
         assert!(!with_line_passed(other).contains(LINE_VAR));

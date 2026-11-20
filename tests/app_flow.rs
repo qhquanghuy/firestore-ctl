@@ -1,4 +1,3 @@
-//! The request flow end to end against the in-memory fake.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod support;
@@ -144,7 +143,6 @@ async fn authorized_write_reaches_gateway_with_its_grant() {
 
 #[tokio::test]
 async fn run_uses_the_grant_it_was_given() {
-    // The grant is for database p/d; the fake is connected to p/other and refuses it.
     let other = DbTarget {
         project: "p".parse().unwrap(),
         database: "other".parse().unwrap(),
@@ -233,7 +231,6 @@ async fn guarded_overwrite_and_merge_check_update_time() {
         )
         .await;
         assert!(fresh.is_ok());
-        // The guard fails on a missing document too (no upsert under a guard).
         let missing = exec(
             &ctx_writable(),
             &FakeFirestore::default(),

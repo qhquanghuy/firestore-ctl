@@ -1,6 +1,5 @@
-//! The write gate: writes are possible only on databases the human listed in
-//! `FIRECTL_WRITABLE`. [`WriteAccess`] can only be obtained from [`WritePolicy::authorize`],
-//! so any code that writes must take one.
+//! Writes are possible only on databases the human listed in `FIRECTL_WRITABLE`. [`WriteAccess`] can
+//! only be obtained from [`WritePolicy::authorize`], so any code that writes must take one.
 
 use std::str::FromStr;
 
@@ -66,11 +65,6 @@ impl FromStr for WritableEntry {
 pub struct WritePolicy(Vec<WritableEntry>);
 
 impl WritePolicy {
-    /// Comma-separated `database` or `project/database` entries; blanks are ignored.
-    /// Unset or empty yields a read-only policy.
-    ///
-    /// # Errors
-    /// [`PolicyError`] for a wildcard or an invalid project or database id.
     pub fn from_env_value(v: Option<&str>) -> Result<Self, PolicyError> {
         v.unwrap_or_default()
             .split(',')
@@ -81,8 +75,6 @@ impl WritePolicy {
             .map(Self)
     }
 
-    /// # Errors
-    /// [`WriteDenied`] when no entry matches (including when the policy is empty).
     pub fn authorize(&self, t: &DbTarget) -> Result<WriteAccess, WriteDenied> {
         self.0
             .iter()
@@ -95,7 +87,7 @@ impl WritePolicy {
     }
 }
 
-/// Proof that writes to one database are allowed; only [`WritePolicy::authorize`] creates one.
+/// Only [`WritePolicy::authorize`] creates one.
 #[derive(Debug, Clone)]
 pub struct WriteAccess {
     target: DbTarget,

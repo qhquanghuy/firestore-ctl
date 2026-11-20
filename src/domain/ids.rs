@@ -1,5 +1,3 @@
-//! Identifier newtypes. Parsed once at the edge; always valid afterwards.
-
 use std::fmt;
 use std::str::FromStr;
 
@@ -45,7 +43,6 @@ fn is_database_id(s: &str) -> bool {
     s == DEFAULT_DATABASE || is_lowercase_slug(s)
 }
 
-/// No `/`, and not a Firestore-reserved name (`.`, `..`, or `__x__`).
 fn is_segment(s: &str) -> bool {
     let reserved =
         s == "." || s == ".." || (s.len() >= 4 && s.starts_with("__") && s.ends_with("__"));
@@ -84,7 +81,6 @@ macro_rules! id_newtype {
 }
 
 id_newtype!(
-    /// A Google Cloud project id (`[a-z0-9-]+`).
     ProjectId,
     "project id",
     "expected lowercase letters, digits and hyphens",
@@ -92,7 +88,6 @@ id_newtype!(
 );
 
 id_newtype!(
-    /// A Firestore database id: `(default)` or lowercase letters, digits and hyphens.
     DatabaseId,
     "database id",
     "expected `(default)` or lowercase letters, digits and hyphens",
@@ -126,13 +121,11 @@ pub struct DbTarget {
 }
 
 impl DbTarget {
-    /// Resource name of the database: `projects/P/databases/D`.
     #[must_use]
     pub fn database_path(&self) -> String {
         format!("projects/{}/databases/{}", self.project, self.database)
     }
 
-    /// Resource name of the documents root: `projects/P/databases/D/documents`.
     #[must_use]
     pub fn documents_root(&self) -> String {
         format!("{}/documents", self.database_path())

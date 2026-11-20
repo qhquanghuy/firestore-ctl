@@ -1,6 +1,5 @@
-//! Firestore protos to domain types. Pure; anything this program cannot represent
-//! (pipeline-only values, a malformed reference) is an error, never a guess. The
-//! one exception is [`index`]: listing indexes skips those the domain cannot express.
+//! Pure; anything this program cannot represent is an error, never a guess. The exception is
+//! [`index`]: listing indexes skips those the domain cannot express.
 
 use std::collections::HashMap;
 
@@ -34,9 +33,6 @@ fn doc_path(name: &str, t: &DbTarget) -> Result<DocPath, GatewayError> {
         .map_err(|e| other(format!("`{name}` is not a document: {e}")))
 }
 
-/// # Errors
-/// [`GatewayError::Other`] if the document is not in `t`, has no update time, or holds a
-/// value this program cannot represent.
 pub fn document(d: proto::Document, t: &DbTarget) -> Result<Document, GatewayError> {
     let path = doc_path(&d.name, t)?;
     let update_time = d
@@ -70,12 +66,6 @@ fn timestamp(ts: &prost_types::Timestamp) -> Result<Timestamp, GatewayError> {
         })
 }
 
-/// A value read from `t`. A reference into `t` is a relative [`Value::Ref`]; one into
-/// another database or project is a [`Value::ForeignRef`] holding its full name.
-///
-/// # Errors
-/// [`GatewayError::Other`] for a value that is absent, out of range, a malformed
-/// reference, or of a pipeline-only kind.
 pub fn value(v: proto::Value, t: &DbTarget) -> Result<Value, GatewayError> {
     match v.value_type {
         Some(ValueType::NullValue(_)) => Ok(Value::Null),
@@ -116,15 +106,12 @@ fn reference(name: &str, t: &DbTarget) -> Result<Value, GatewayError> {
     }
 }
 
-/// # Errors
-/// [`GatewayError::Other`] if the timestamp is out of range.
 pub fn update_time(t: &prost_types::Timestamp) -> Result<UpdateTime, GatewayError> {
     timestamp(t).map(UpdateTime::new)
 }
 
-/// Indexes the domain cannot express are skipped (`None`), never approximated: vector or
-/// search fields, recursive scope, an unknown field mode, a field path that does not
-/// parse. Only the implicit trailing `__name__` field is dropped.
+/// Indexes the domain cannot express are skipped, never approximated; only the implicit trailing
+/// `__name__` field is dropped.
 pub fn index(c: &CollectionId, i: &admin::Index) -> Option<IndexInfo> {
     let scope = match ProtoScope::try_from(i.query_scope).ok()? {
         ProtoScope::Collection => QueryScope::Collection,
@@ -233,7 +220,6 @@ mod tests {
                 Ok(Value::ForeignRef(name.parse().unwrap()))
             );
         }
-        // a sibling database whose name merely starts with ours is still foreign
         let sibling = to_proto::value(&Value::Ref(doc("a/b")), &target("p", "d-2"));
         assert!(matches!(value(sibling, &ours), Ok(Value::ForeignRef(_))));
     }
@@ -327,7 +313,6 @@ mod tests {
                 nanos: 0,
             }),
         };
-        // `d2` must not match by prefix.
         assert!(
             document(
                 named("projects/p/databases/d2/documents/users/u1", true),

@@ -1,5 +1,3 @@
-//! Untagged, one-way JSON for humans and `jq` (`--plain`); not meant to be read back.
-
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value as Json, json};
@@ -8,8 +6,6 @@ use super::{double_json, fields_to_object};
 use crate::domain::document::Document;
 use crate::domain::value::Value;
 
-/// Timestamps, references and bytes (standard base64) become strings; non-finite doubles
-/// become `"NaN"`, `"Infinity"`, `"-Infinity"`.
 #[must_use]
 pub fn value_to_json(v: &Value) -> Json {
     match v {
@@ -28,8 +24,7 @@ pub fn value_to_json(v: &Value) -> Json {
     }
 }
 
-/// The `_plain` marker makes `set --data` refuse the output: untagged values are lossy (a
-/// timestamp would be written back as a string).
+/// The `_plain` marker makes `set --data` refuse the output: untagged values are lossy.
 #[must_use]
 pub fn document_to_json(d: &Document) -> Json {
     json!({

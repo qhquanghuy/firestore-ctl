@@ -1,7 +1,5 @@
-//! An in-memory [`Firestore`] for flow tests. Follows the write contract documented on
-//! `Firestore::write` exactly. Models `==` filters on top-level fields, `limit` and
-//! `count`; anything else (order, offset, select, other operators, nested fields,
-//! sum/avg, nested-map merge) fails with `GatewayError::Other("fake: unsupported ...")`.
+//! Follows the write contract documented on `Firestore::write` exactly. Anything it does not model
+//! fails with `GatewayError::Other("fake: unsupported ...")` rather than diverge from Firestore.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -77,7 +75,6 @@ impl FakeFirestore {
         UpdateTime::new(Timestamp::from_unix(seconds, 0).expect("in-range timestamp"))
     }
 
-    /// Anything the fake does not model is an error, never silently ignored.
     fn matching(&self, q: &Query) -> Result<Vec<Document>, GatewayError> {
         let unsupported =
             |what: &str| Err(GatewayError::Other(format!("fake: unsupported {what}")));
@@ -142,8 +139,8 @@ fn check_precondition(
     }
 }
 
-/// Top-level merge of `new` over the stored fields. Shallow: nested maps replace
-/// rather than merge, so the fake refuses them instead of diverging from Firestore.
+/// Shallow: nested maps replace rather than merge, so the fake refuses them instead of diverging
+/// from Firestore.
 fn shallow_merge(existing: Option<Document>, new: &Fields) -> Result<Fields, GatewayError> {
     if new.values().any(|v| matches!(v, Value::Map(_))) {
         return Err(GatewayError::Other(

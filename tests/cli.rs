@@ -1,7 +1,3 @@
-//! The command-line surface, driven through the real binary. None of these tests
-//! reach a real service: `FIRESTORE_EMULATOR_HOST` points every run at a dead port, so
-//! a test that gets as far as connecting fails there (usage errors and write denial
-//! happen before connecting).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use assert_cmd::Command;
@@ -276,8 +272,6 @@ fn malformed_writable_fails_writes_with_exit_1() {
 
 #[test]
 fn malformed_writable_does_not_block_reads() {
-    // `query` on a document path is rejected while building the request (exit 2),
-    // which is only reached if the policy error did not stop the command (exit 1).
     firectl()
         .env("FIRECTL_WRITABLE", "*")
         .args(["--project", "p", "query", "users/u1"])
@@ -378,7 +372,6 @@ fn invalid_database_env_is_a_usage_error() {
 
 #[test]
 fn allowed_write_passes_authorization() {
-    // Past the policy gate the bad --data is an input error (exit 2), not a denial (exit 6).
     firectl()
         .env("FIRECTL_WRITABLE", "p/d")
         .args([
@@ -441,8 +434,6 @@ fn global_flags_have_their_own_help_section() {
         .stdout(contains("Global options:"));
 }
 
-// Nothing listens on port 1: these reach the connection step (policy, parsing and
-// authorization all passed) and fail there, without touching any real service.
 #[test]
 fn authorized_write_to_an_unreachable_endpoint_exits_1_not_6() {
     firectl()
@@ -487,8 +478,6 @@ fn overlapping_update_paths_are_a_usage_error() {
         .stderr(contains("conflicting changes to `a` and `a.b`"));
 }
 
-/// What the bash script sends: `FIRECTL_COMPLETE=bash`, the words after `--`, the index of the
-/// word being completed and the line up to the cursor.
 fn completion_line(words: &[&str], line: Option<&str>) -> Command {
     let mut cmd = firectl();
     cmd.env("FIRECTL_COMPLETE", "bash")
@@ -530,7 +519,6 @@ fn registration_script_calls_back_into_the_binary() {
         zsh.contains("FIRECTL_COMPLETE") && zsh.contains("firectl"),
         "{zsh}"
     );
-    // The bash script also tells the binary where the cursor is, to quote candidates.
     let bash = script("bash");
     assert!(
         bash.contains("FIRECTL_COMPLETE") && bash.contains("_FIRECTL_COMP_LINE"),
@@ -628,7 +616,6 @@ fn completing_operators_needs_no_database() {
 
 fn seeded_cache(collections: &[&str], fields: &[(&str, &[&str])]) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    // `firectl()` points every run at the emulator 127.0.0.1:1, whose answers are cached apart.
     let db = dir
         .path()
         .join("firectl/p/(default)/emulator-127%2E0%2E0%2E1%3A1");
@@ -646,8 +633,7 @@ fn seeded_cache(collections: &[&str], fields: &[(&str, &[&str])]) -> tempfile::T
     dir
 }
 
-/// A lookup the cache does not answer fails at once against the dead emulator port: no test
-/// can reach a real service.
+/// A lookup the cache does not answer fails at once against the dead emulator port.
 fn completion_cached(cache: &tempfile::TempDir, words: &[&str], line: Option<&str>) -> Command {
     let mut cmd = completion_line(words, line);
     cmd.env("XDG_CACHE_HOME", cache.path());
@@ -711,9 +697,7 @@ fn cached_fields_are_offered_per_flag() {
         ["address", "address.city"]
     );
     assert_eq!(offered("--where", "na", None), ["name"]);
-    // A name that bash would take for a command substitution is quoted for it ...
     assert_eq!(offered("--select", "my", None), ["'`my-field`'"]);
-    // ... unless the cursor is already inside a quote (which then stays as it is).
     let in_single = "firectl --project p query users --where 'my";
     assert_eq!(offered("--where", "my", Some(in_single)), ["`my-field`"]);
     let in_double = r#"firectl --project p query users --where "my"#;
@@ -724,8 +708,6 @@ fn cached_fields_are_offered_per_flag() {
 
 #[test]
 fn without_the_command_line_only_plain_candidates_are_offered() {
-    // A bash registration that does not pass the cursor's quoting (an older script, or one
-    // not made by `firectl completions`): names that need quoting are left out, not guessed.
     let fields: &[&str] = &["name", "`my-field`", "a b"];
     let cache = seeded_cache(&["users"], &[("users", fields)]);
     let words = [

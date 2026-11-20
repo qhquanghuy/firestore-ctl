@@ -1,5 +1,3 @@
-//! `--order-by` terms: `field` or `field:asc|desc`.
-
 use std::str::FromStr;
 
 use super::{ParseError, parse_field, unquoted};
@@ -8,7 +6,6 @@ use crate::domain::{Direction, OrderBy};
 impl FromStr for OrderBy {
     type Err = ParseError;
 
-    /// No direction means ascending; the direction follows the last `:` outside backticks.
     fn from_str(s: &str) -> Result<Self, ParseError> {
         let trimmed = s.trim();
         let (field, direction) = match unquoted(trimmed, '`').filter(|&(_, c)| c == ':').last() {
