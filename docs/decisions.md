@@ -155,3 +155,22 @@ Terms: see `glossary.md`.
   `.#static` too, so a broken static build is caught before tagging.
 - **Public repo.** History was rewritten before publishing: internal names were removed and authors use a
   noreply email.
+- **Coverage is report-only: no percentage gate.** A gate rewards junk tests. CI prints the table into the job
+  summary and the number feeds the badge; nothing fails on it. The number counts inline `#[cfg(test)]` code
+  too, so read it as a trend, not a score.
+  - One instrumented run of every test, emulator included (`cargo llvm-cov nextest --run-ignored all` inside
+    `firebase emulators:exec`). `nix flake check` stays the gate and does not run coverage.
+  - Tooling: `cargo-llvm-cov`, with `LLVM_COV`/`LLVM_PROFDATA` taken from `pkgs.rustc.llvmPackages.llvm`
+    so they always match rustc's LLVM (nixpkgs `rustc` ships without `llvm-tools`). If it breaks, stop and
+    fix it; there is no tarpaulin fallback.
+  - Comparing before and after a change: compare missed production lines from `--lcov` output, not summary
+    totals (deleting a test also deletes covered test lines).
+- **The coverage badge comes from an orphan `badges` branch, not a third-party service.** On pushes to `main`,
+  a `badge` job force-pushes a fresh single-commit tree holding a shields.io endpoint file
+  (`coverage.json`) to `badges`, using the built-in `GITHUB_TOKEN`. No Codecov account, no secrets.
+  - The `badge` job is the only one with `contents: write`. It runs no repo code and is skipped on every
+    pull request, so no PR run (fork or same-repo) holds a write token. The trigger stays `pull_request`,
+    never `pull_request_target`. The coverage job keeps `contents: read` and `persist-credentials: false`.
+  - `badges` must stay unprotected (a ruleset over all branches would reject the force-push). The README
+    badge reads `raw.githubusercontent.com`, which works only while the repo is public. A newer push can
+    cancel an in-flight `badge` job (`cancel-in-progress`); the next run restores the badge.

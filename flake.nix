@@ -78,6 +78,10 @@
         devShells.default = pkgs.mkShell {
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
 
+          # nixpkgs rustc ships without llvm-tools; take the LLVM rustc itself was built with.
+          LLVM_COV = "${pkgs.rustc.llvmPackages.llvm}/bin/llvm-cov";
+          LLVM_PROFDATA = "${pkgs.rustc.llvmPackages.llvm}/bin/llvm-profdata";
+
           packages = with pkgs; [
             rustc
             cargo
@@ -85,6 +89,7 @@
             rustfmt
             rust-analyzer
             cargo-nextest
+            cargo-llvm-cov
             pkg-config
             firebase-tools
             jdk21_headless

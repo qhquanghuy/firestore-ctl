@@ -1,5 +1,8 @@
 # firectl
 
+[![CI](https://github.com/qhquanghuy/firestore-ctl/actions/workflows/ci.yml/badge.svg)](https://github.com/qhquanghuy/firestore-ctl/actions/workflows/ci.yml)
+![coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/qhquanghuy/firestore-ctl/badges/coverage.json)
+
 `firectl` queries Google Cloud Firestore from the command line: read documents, run
 queries and counts, list collections and indexes, and (only where you allow it) write.
 It is built to be driven by scripts and coding agents as well as people, so output is
