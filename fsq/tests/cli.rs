@@ -476,3 +476,89 @@ fn overlapping_update_paths_are_a_usage_error() {
         .code(2)
         .stderr(contains("conflicting changes to `a` and `a.b`"));
 }
+
+/// What the shell script sends to complete the last of `words`: `fsq` called with
+/// `COMPLETE=bash`, the words after `--`, and the index of the word being completed.
+fn completion(words: &[&str]) -> Command {
+    let mut cmd = fsq();
+    cmd.env("COMPLETE", "bash")
+        .env("_CLAP_COMPLETE_INDEX", (words.len() - 1).to_string())
+        .env("_CLAP_IFS", "\n")
+        .arg("--")
+        .args(words);
+    cmd
+}
+
+#[test]
+fn completions_prints_the_registration_line() {
+    for shell in ["bash", "zsh"] {
+        fsq()
+            .args(["completions", shell])
+            .assert()
+            .success()
+            .stdout(format!("source <(COMPLETE={shell} fsq)\n"));
+    }
+    fsq().args(["completions", "tcsh"]).assert().code(2);
+}
+
+#[test]
+fn registration_script_calls_back_into_the_binary() {
+    fsq()
+        .env("COMPLETE", "zsh")
+        .assert()
+        .success()
+        .stdout(contains("COMPLETE").and(contains("fsq")));
+}
+
+#[test]
+fn completing_flags_needs_no_project() {
+    completion(&["fsq", "query", "users", "--wh"])
+        .assert()
+        .success()
+        .stdout(contains("--where"))
+        .stderr("");
+}
+
+/// The completion candidates `words` get, which must come with an empty stderr.
+fn candidates(words: &[&str]) -> Vec<String> {
+    let assert = completion(words)
+        .timeout(std::time::Duration::from_secs(10))
+        .assert()
+        .success()
+        .stderr("");
+    String::from_utf8(assert.get_output().stdout.clone())
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn collections_are_not_offered_without_a_project() {
+    // Only the flags are left: nothing was looked up, nothing was said.
+    let offered = candidates(&["fsq", "query", ""]);
+    assert!(offered.iter().all(|c| c.starts_with("--")), "{offered:?}");
+}
+
+#[test]
+fn completion_failures_are_silent() {
+    // A project is known, but the database is unreachable (dead emulator port).
+    let offered = candidates(&["fsq", "--project", "p", "query", ""]);
+    assert!(offered.iter().all(|c| c.starts_with("--")), "{offered:?}");
+    assert_eq!(
+        candidates(&["fsq", "--project", "p", "query", "users", "--where", ""]),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        candidates(&["fsq", "--project", "p", "query", "users", "--select", "a,"]),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn completing_operators_needs_no_database() {
+    assert_eq!(
+        candidates(&["fsq", "query", "users", "--where", "age >"]),
+        ["age >", "age >="]
+    );
+}

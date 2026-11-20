@@ -11,12 +11,12 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use clap_complete::Shell;
 use itertools::Itertools;
 use serde_json::Value as Json;
 
 use crate::app::{AppError, Request};
 use crate::codec::typed_json;
+use crate::complete::{collection_completer, field_completer};
 use crate::domain::{
     AggregateQuery, Aggregation, AnyPath, CollectionId, DatabaseId, DbTarget, DeleteDoc, DocPath,
     FieldOp, FieldPath, Filter, Guard, IdError, Limit, NonEmptyVec, OrderBy, ProjectId, Query,
@@ -79,6 +79,11 @@ Environment:
   FSQ_PROJECT    default for --project
   FSQ_DATABASE   default for --database (otherwise "(default)")
   Flags win over environment variables.
+
+Completion:
+  Add `source <(COMPLETE=zsh fsq)` (or `COMPLETE=bash`) to your shell's rc file. TAB then
+  completes collection ids and field names from the database (needs --project or
+  FSQ_PROJECT; answers are cached for 10 minutes in $XDG_CACHE_HOME/fsq).
 
 Output:
   A table on a terminal, JSON otherwise (indented on a terminal, compact in a pipe);
@@ -151,6 +156,26 @@ impl ConnArgs {
         let project = resolve(self.project.as_ref(), "FSQ_PROJECT", &env)?;
         let database = resolve(self.database.as_ref(), "FSQ_DATABASE", &env)?.unwrap_or_default();
         Ok(project.map(|project| DbTarget { project, database }))
+    }
+}
+
+/// The shells `fsq completions` knows how to enable completion in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CompletionShell {
+    /// Bash.
+    Bash,
+    /// Zsh.
+    Zsh,
+}
+
+impl CompletionShell {
+    /// The value of `COMPLETE` that selects this shell.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Bash => "bash",
+            Self::Zsh => "zsh",
+        }
     }
 }
 
@@ -269,16 +294,16 @@ impl FromStr for FieldList {
 pub struct Selection {
     /// Collection to read, e.g. `users` or `users/u1/orders`. With --group: optionally
     /// a document, to search only below it.
-    #[arg(value_name = "PATH", required_unless_present = "group")]
+    #[arg(value_name = "PATH", required_unless_present = "group", add = collection_completer())]
     path: Option<AnyPath>,
     /// Read every collection with this id at any depth (a bare id like `orders`).
-    #[arg(long, value_name = "COLLECTION_ID")]
+    #[arg(long, value_name = "COLLECTION_ID", add = collection_completer())]
     group: Option<CollectionId>,
     /// Condition `<field> <op> <value>`, e.g. --where 'age >= 18'; repeat for AND. Quote the
     /// whole filter. Operators: == != < <= > >= in not-in array-contains
     /// array-contains-any; `in`, `not-in` and `array-contains-any` take a list `[a, b]`.
     /// Values: 18, 1.5, true, null, ts:2026-01-05T10:00:00Z, ref:users/u1, "quoted text".
-    #[arg(long = "where", value_name = "FILTER", action = clap::ArgAction::Append)]
+    #[arg(long = "where", value_name = "FILTER", action = clap::ArgAction::Append, add = field_completer())]
     where_: Vec<Filter>,
 }
 
@@ -320,7 +345,7 @@ pub enum Cmd {
         #[command(flatten)]
         selection: Selection,
         /// Sort term `field` or `field:desc`; repeat for several.
-        #[arg(long, value_name = "FIELD[:asc|desc]", action = clap::ArgAction::Append)]
+        #[arg(long, value_name = "FIELD[:asc|desc]", action = clap::ArgAction::Append, add = field_completer())]
         order_by: Vec<OrderBy>,
         /// Maximum documents returned.
         #[arg(long, value_name = "N", conflicts_with = "all")]
@@ -332,7 +357,7 @@ pub enum Cmd {
         #[arg(long, value_name = "N", default_value_t = 0)]
         offset: u32,
         /// Return only these fields, comma separated: `name,address.city`.
-        #[arg(long, value_name = "FIELDS")]
+        #[arg(long, value_name = "FIELDS", add = field_completer())]
         select: Option<FieldList>,
     },
     /// Count documents, or sum/average a numeric field, on the server.
@@ -341,10 +366,10 @@ pub enum Cmd {
         #[command(flatten)]
         selection: Selection,
         /// Also sum this field; repeat for several fields.
-        #[arg(long, value_name = "FIELD", value_parser = strict_field, action = clap::ArgAction::Append)]
+        #[arg(long, value_name = "FIELD", value_parser = strict_field, action = clap::ArgAction::Append, add = field_completer())]
         sum: Vec<FieldPath>,
         /// Also average this field; repeat for several fields.
-        #[arg(long, value_name = "FIELD", value_parser = strict_field, action = clap::ArgAction::Append)]
+        #[arg(long, value_name = "FIELD", value_parser = strict_field, action = clap::ArgAction::Append, add = field_completer())]
         avg: Vec<FieldPath>,
     },
     /// List collection ids: the root ones, or those under a document.
@@ -357,6 +382,7 @@ pub enum Cmd {
     #[command(after_long_help = SEE_ROOT_HELP)]
     Indexes {
         /// Collection id, e.g. `orders`.
+        #[arg(add = collection_completer())]
         collection: CollectionId,
     },
     /// Write a whole document. Creates it; fails with exit 4 if it exists, unless
@@ -392,7 +418,8 @@ pub enum Cmd {
             long = "set",
             value_name = "OP",
             required = true,
-            action = clap::ArgAction::Append
+            action = clap::ArgAction::Append,
+            add = field_completer()
         )]
         set: Vec<FieldOp>,
         /// Only write if the document's _updateTime is exactly this.
@@ -408,11 +435,11 @@ pub enum Cmd {
         #[arg(long, value_name = "UPDATE_TIME")]
         if_unchanged_since: Option<UpdateTime>,
     },
-    /// Print a shell completion script.
+    /// Print the line that enables shell completion (add it to your shell's rc file).
     #[command(after_long_help = SEE_ROOT_HELP)]
     Completions {
-        /// The shell to generate for.
-        shell: Shell,
+        /// The shell to enable completion in.
+        shell: CompletionShell,
     },
 }
 

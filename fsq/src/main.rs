@@ -6,8 +6,10 @@ use std::process::ExitCode;
 
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
+use clap_complete::CompleteEnv;
 use fsq::app::{self, AppError, Context};
 use fsq::cli::{Cli, Cmd};
+use fsq::complete::registration_line;
 use fsq::domain::DbTarget;
 use fsq::exit::exit_code;
 use fsq::grpc;
@@ -33,13 +35,27 @@ fn effective_policy(
     }
 }
 
+fn main() -> ExitCode {
+    // Shell completion requests (`COMPLETE=<shell>`) are answered, and the process exits,
+    // before anything else happens. This must run outside the async runtime: completers
+    // start their own.
+    CompleteEnv::with_factory(Cli::command).complete();
+    run()
+}
+
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> ExitCode {
+async fn run() -> ExitCode {
     let cli = Cli::parse();
 
     if let Cmd::Completions { shell } = &cli.cmd {
-        clap_complete::generate(*shell, &mut Cli::command(), "fsq", &mut io::stdout());
-        return ExitCode::SUCCESS;
+        return match writeln!(io::stdout(), "{}", registration_line(*shell)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("cannot write output: {e}");
+                ExitCode::from(1)
+            }
+        };
     }
 
     let target = match cli.conn.target(|name| std::env::var(name).ok()) {

@@ -36,7 +36,7 @@ pub enum Op {
 
 impl Op {
     /// Every operator.
-    const ALL: [Op; 10] = [
+    pub const ALL: [Op; 10] = [
         Op::Eq,
         Op::Ne,
         Op::Lt,

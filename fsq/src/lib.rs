@@ -3,6 +3,7 @@
 pub mod app;
 pub mod cli;
 pub mod codec;
+pub mod complete;
 pub mod domain;
 pub mod exit;
 pub mod grpc;
