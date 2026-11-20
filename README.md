@@ -12,9 +12,18 @@ Run `fsq --help` for the value syntax, field quoting, typed JSON tags and exit c
 
 ```sh
 nix build                 # ./result/bin/fsq
-nix profile install .#    # put fsq on your PATH
 nix develop               # dev shell: rust toolchain, cargo-nextest, firebase-tools, jdk
 nix flake check           # fmt, clippy (-D warnings), tests
+```
+
+To put `fsq` on your PATH, add the flake to your NixOS or home-manager config:
+
+```nix
+# flake.nix inputs (private repo: the ssh URL uses your SSH key)
+inputs.fsq.url = "git+ssh://git@github.com/qhquanghuy/fsq";
+
+# home-manager (or environment.systemPackages on NixOS)
+home.packages = [ inputs.fsq.packages.${pkgs.system}.default ];
 ```
 
 ## Connecting
