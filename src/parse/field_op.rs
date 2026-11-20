@@ -6,6 +6,8 @@ use crate::domain::{FieldOp, Value};
 const FIELD_HINT: &str =
     "for a comparison use `==` in --where; backtick-quote unusual field names, e.g. `my-field`";
 
+const BRACE_HINT: &str = r#"a value starting with `{` is not a map; to store it as text quote it, e.g. a="{\"x\":1}"; to write a map use firectl set <doc> --merge --data '{"a":{"x":1}}'"#;
+
 impl FromStr for FieldOp {
     type Err = ParseError;
 
@@ -24,6 +26,9 @@ impl FromStr for FieldOp {
                 s,
                 "value starts with `=`; for a comparison use `==` in --where (quote the value to set it literally)",
             ));
+        }
+        if text.starts_with('{') {
+            return Err(ParseError::new(s, BRACE_HINT));
         }
         let value = parse_token(text).map_err(|e| ParseError::new(s, e.reason))?;
         let before = before.trim_end();
@@ -172,5 +177,36 @@ mod tests {
         let e = "when=ts:soon".parse::<FieldOp>().unwrap_err();
         assert_eq!(e.input, "when=ts:soon");
         assert!(!e.reason.contains("ts:soon:"), "{e}");
+    }
+
+    #[test]
+    fn an_unquoted_value_starting_with_a_brace_is_rejected_with_both_ways_out() {
+        for bad in [r#"a={"x":1}"#, "a+={", "a-={x}", "a = {}"] {
+            let e = bad.parse::<FieldOp>().unwrap_err();
+            assert!(e.reason.contains(r#"a="{\"x\":1}""#), "{bad}: {e}");
+            assert!(
+                e.reason
+                    .contains(r#"firectl set <doc> --merge --data '{"a":{"x":1}}'"#),
+                "{bad}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_suggested_quoted_form_stores_the_string() {
+        assert_eq!(
+            op(r#"a="{\"x\":1}""#),
+            FieldOp::Set(fp("a"), Value::String(r#"{"x":1}"#.into()))
+        );
+        assert_eq!(
+            op(r#"a+="{x}""#),
+            FieldOp::ArrayUnion(fp("a"), vec!["{x}".into()])
+        );
+    }
+
+    #[test]
+    fn a_brace_after_the_first_character_is_text() {
+        assert_eq!(op("a=x{"), FieldOp::Set(fp("a"), "x{".into()));
+        assert_eq!(op("a= x{}"), FieldOp::Set(fp("a"), "x{}".into()));
     }
 }

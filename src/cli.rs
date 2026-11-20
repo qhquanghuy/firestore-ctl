@@ -34,6 +34,8 @@ const LONG_HELP: &str = r#"Values (--where, --set, lists):
   [a, "b c", 3]         list, for `in`, `not-in`, `array-contains-any`, `+=`, `-=`
   anything else         a string. Numbers with leading zeros (007, 0123) stay strings;
                         quote a value to force a string ("18", "true", "null").
+  A --set value starting with { is rejected: quote it to store text, or use
+  `set --merge --data` to write a map. (--where compares it as a string.)
   A whole filter is one shell argument:  --where 'name == "John Smith"'
   Operators: == != < <= > >= in not-in array-contains array-contains-any
 
@@ -394,7 +396,8 @@ pub enum Cmd {
         /// `f=v` sets a field; `f+=v` ARRAY-UNION (adds v to an array); `f-=v` ARRAY-REMOVE
         /// (removes v from an array); not numeric increments. Repeat for several changes.
         /// Values: 18, 1.5, true, null, ts:..., ref:..., "text", [a, b]. Backtick field
-        /// names with spaces or punctuation: `my-field`=1.
+        /// names with spaces or punctuation: `my-field`=1. A value starting with `{` must be
+        /// quoted (it is not a map; use `set --merge --data` for maps).
         #[arg(
             long = "set",
             value_name = "OP",
@@ -898,6 +901,29 @@ mod tests {
             request(&["set", "users/u1", "--data", "[1]"]),
             Err(AppError::Input(m)) if m.contains("expected a JSON object")
         ));
+    }
+
+    #[test]
+    fn merge_data_writes_a_map_field() {
+        let s = set_of(&["set", "users/u1", "--merge", "--data", r#"{"a":{"x":1}}"#]);
+        let map = Fields::from([("x".to_owned(), Value::Int(1))]);
+        assert_eq!(s.data, Fields::from([("a".to_owned(), Value::Map(map))]));
+        assert_eq!(s.mode, SetMode::Merge(Guard::None));
+    }
+
+    #[test]
+    fn update_rejects_an_unquoted_brace_value_as_a_usage_error() {
+        let e = Cli::try_parse_from([
+            "firectl",
+            "--project",
+            "p",
+            "update",
+            "users/u1",
+            "--set",
+            r#"a={"x":1}"#,
+        ])
+        .unwrap_err();
+        assert_eq!(e.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]

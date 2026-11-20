@@ -473,7 +473,7 @@ fn overlapping_update_paths_are_a_usage_error() {
             "update",
             "users/u1",
             "--set",
-            "a={\"x\":1}",
+            "a=1",
             "--set",
             "a.b=2",
         ])

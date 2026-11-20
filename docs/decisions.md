@@ -70,6 +70,9 @@ Terms: see `glossary.md`.
 - **Flag values.**
   - Bare tokens are typed: numbers, `true`/`false`, `null`.
   - Leading zeros and a leading `+` stay strings.
+  - An unquoted `--set` value starting with `{` is a usage error, not a string: it is almost always a
+    map written by accident. Quote it to store text, or use `set --merge --data` for a map. Filters
+    keep the string reading (`--where 'payload == {"x":1}'`), since users query JSON-encoded string fields.
   - Field names with spaces or operator characters need backticks, so `createdAt desc` can't silently
     become a field name.
 

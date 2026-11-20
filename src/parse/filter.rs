@@ -140,4 +140,12 @@ mod tests {
         assert_eq!(e.input, "when == ts:soon");
         assert!(!e.reason.contains("ts:soon:"), "{e}");
     }
+
+    #[test]
+    fn a_brace_value_stays_a_string_in_filters() {
+        for text in [r#"payload == {"x":1}"#, r#"payload == "{\"x\":1}""#] {
+            let f: Filter = text.parse().unwrap();
+            assert_eq!(f.value(), &Value::String(r#"{"x":1}"#.into()), "{text}");
+        }
+    }
 }
