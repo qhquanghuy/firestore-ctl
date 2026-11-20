@@ -151,10 +151,7 @@ mod tests {
             database: "jobs-db".parse().unwrap(),
         };
         assert_eq!(t.database_path(), "projects/p/databases/jobs-db");
-        assert_eq!(
-            t.documents_root(),
-            "projects/p/databases/jobs-db/documents"
-        );
+        assert_eq!(t.documents_root(), "projects/p/databases/jobs-db/documents");
     }
 
     #[test]

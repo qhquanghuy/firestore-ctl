@@ -6,12 +6,12 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
-use fsq::domain::{
+use firectl::domain::{
     AggregateQuery, Aggregation, CollectionId, DbTarget, DocPath, Document, FieldOp, Fields, Guard,
     Op, Query, Scope, SetMode, Timestamp, UpdateTime, Value, Write,
 };
-use fsq::policy::WriteAccess;
-use fsq::port::{AggregateResult, Firestore, GatewayError, IndexInfo, Written};
+use firectl::policy::WriteAccess;
+use firectl::port::{AggregateResult, Firestore, GatewayError, IndexInfo, Written};
 
 pub fn default_target() -> DbTarget {
     DbTarget {

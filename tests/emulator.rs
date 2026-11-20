@@ -2,7 +2,7 @@
 //!
 //! The tests that need the emulator are `#[ignore]`d (`is_local_accepts_only_loopback` is
 //! not and runs everywhere). Run them with
-//! `firebase emulators:exec --only firestore --project demo-fsq 'cargo nextest run --test emulator --run-ignored all'`.
+//! `firebase emulators:exec --only firestore --project demo-firectl 'cargo nextest run --test emulator --run-ignored all'`.
 //! Each test uses its own `demo-` project, cleared first so the suite can be re-run, and
 //! refuses to run unless `FIRESTORE_EMULATOR_HOST` names a local address: these tests write,
 //! and must never reach a real project.
@@ -66,30 +66,30 @@ impl Emulator {
             "FIRESTORE_EMULATOR_HOST must be a local host:port (got {host:?}); run these \
              tests through `firebase emulators:exec`"
         );
-        let project = format!("demo-fsq-{name}");
+        let project = format!("demo-firectl-{name}");
         clear_project(&host, &project);
         Self { project }
     }
 
-    fn fsq(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::cargo_bin("fsq").expect("fsq binary builds");
-        cmd.env_remove("FSQ_DATABASE")
-            .env_remove("FSQ_COMPLETE")
-            .env("XDG_CACHE_HOME", "/dev/null/fsq-test-cache")
-            .env("FSQ_PROJECT", &self.project)
-            .env("FSQ_WRITABLE", format!("{}/(default)", self.project))
+    fn firectl(&self, args: &[&str]) -> Command {
+        let mut cmd = Command::cargo_bin("firectl").expect("firectl binary builds");
+        cmd.env_remove("FIRECTL_DATABASE")
+            .env_remove("FIRECTL_COMPLETE")
+            .env("XDG_CACHE_HOME", "/dev/null/firectl-test-cache")
+            .env("FIRECTL_PROJECT", &self.project)
+            .env("FIRECTL_WRITABLE", format!("{}/(default)", self.project))
             .args(args);
         cmd
     }
 
     fn ok(&self, args: &[&str]) -> String {
-        let out = self.fsq(args).assert().success().get_output().clone();
+        let out = self.firectl(args).assert().success().get_output().clone();
         String::from_utf8(out.stdout).expect("utf-8 output")
     }
 
     fn ok_with_stdin(&self, args: &[&str], stdin: &str) -> String {
         let out = self
-            .fsq(args)
+            .firectl(args)
             .write_stdin(stdin)
             .assert()
             .success()
@@ -99,7 +99,7 @@ impl Emulator {
     }
 
     fn fails_with(&self, args: &[&str], code: i32) {
-        self.fsq(args).assert().code(code);
+        self.firectl(args).assert().code(code);
     }
 
     fn json(&self, args: &[&str]) -> Json {
@@ -450,12 +450,12 @@ fn collections_lists_root_and_subcollections() {
 #[ignore = "needs FIRESTORE_EMULATOR_HOST"]
 fn writes_are_refused_without_a_matching_writable_entry() {
     let emu = Emulator::project("readonly");
-    emu.fsq(&["set", "users/u1", "--data", r#"{"n": 1}"#])
-        .env_remove("FSQ_WRITABLE")
+    emu.firectl(&["set", "users/u1", "--data", r#"{"n": 1}"#])
+        .env_remove("FIRECTL_WRITABLE")
         .assert()
         .code(6);
-    emu.fsq(&["set", "users/u1", "--data", r#"{"n": 1}"#])
-        .env("FSQ_WRITABLE", "(default)")
+    emu.firectl(&["set", "users/u1", "--data", r#"{"n": 1}"#])
+        .env("FIRECTL_WRITABLE", "(default)")
         .assert()
         .code(1);
     emu.fails_with(&["get", "users/u1"], 3);
@@ -465,8 +465,8 @@ fn writes_are_refused_without_a_matching_writable_entry() {
 #[ignore = "needs FIRESTORE_EMULATOR_HOST"]
 fn a_writable_entry_for_another_project_does_not_allow_writes() {
     let emu = Emulator::project("other-proj");
-    emu.fsq(&["set", "users/u1", "--data", r#"{"n": 1}"#])
-        .env("FSQ_WRITABLE", "other-proj/(default)")
+    emu.firectl(&["set", "users/u1", "--data", r#"{"n": 1}"#])
+        .env("FIRECTL_WRITABLE", "other-proj/(default)")
         .assert()
         .code(6);
     emu.fails_with(&["get", "users/u1"], 3);
@@ -545,7 +545,7 @@ fn writing_back_a_stale_document_fails_unless_forced() {
     assert_ne!(edited, read);
 
     for mode in ["--overwrite", "--merge"] {
-        emu.fsq(&["set", "users/u1", mode, "--data", "-"])
+        emu.firectl(&["set", "users/u1", mode, "--data", "-"])
             .write_stdin(edited.clone())
             .assert()
             .code(5);
@@ -568,7 +568,7 @@ fn writing_back_a_stale_document_fails_unless_forced() {
     emu.ok_with_stdin(&["set", "users/u1", "--merge", "--data", "-"], &fresh);
 
     let current = update_time(&emu, "users/u1");
-    emu.fsq(&[
+    emu.firectl(&[
         "set",
         "users/u1",
         "--overwrite",
@@ -605,7 +605,7 @@ fn plain_output_cannot_be_set_back() {
     let plain = emu.ok(&["get", "users/u1", "--plain"]);
     assert_eq!(parse(&plain)["_plain"], json!(true));
     for mode in ["--overwrite", "--merge"] {
-        emu.fsq(&["set", "users/u1", mode, "--data", "-"])
+        emu.firectl(&["set", "users/u1", mode, "--data", "-"])
             .write_stdin(plain.clone())
             .assert()
             .code(2);
@@ -626,7 +626,7 @@ fn a_select_projection_can_be_merged_but_not_overwritten() {
     assert_eq!(projected[0]["data"], json!({"a": 1, "b": 2}));
 
     let doc = projected[0].to_string().replace(r#""a":1"#, r#""a":10"#);
-    emu.fsq(&["set", "users/u1", "--overwrite", "--data", "-"])
+    emu.firectl(&["set", "users/u1", "--overwrite", "--data", "-"])
         .write_stdin(doc.clone())
         .assert()
         .code(2);
@@ -662,7 +662,7 @@ fn a_query_stopping_at_the_default_limit_says_so_on_stderr() {
     }
     let note = "note: showing the first 100 documents; use --limit N or --all\n";
     let run = |args: &[&str]| {
-        let out = emu.fsq(args).assert().success().get_output().clone();
+        let out = emu.firectl(args).assert().success().get_output().clone();
         (
             String::from_utf8(out.stdout).expect("utf-8 stdout"),
             String::from_utf8(out.stderr).expect("utf-8 stderr"),

@@ -316,10 +316,7 @@ mod tests {
     fn gcloud_command_names_database() {
         let cmd = composite(&query("users", &["status == active", "age > 18"], &[]))
             .gcloud_command(&target("p", "app-db"));
-        assert!(
-            cmd.contains("--database=app-db")
-                && cmd.contains("--collection-group=users")
-        );
+        assert!(cmd.contains("--database=app-db") && cmd.contains("--collection-group=users"));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Dynamic shell completion (`FSQ_COMPLETE=<shell> fsq`): collection ids and field names are
+//! Dynamic shell completion (`FIRECTL_COMPLETE=<shell> firectl`): collection ids and field names are
 //! looked up in the addressed database while the user presses TAB.
 //!
 //! Completion must never get in the way, so every completer here is best effort:
@@ -8,9 +8,9 @@
 //! - it gives up after [`DEADLINE`], connecting included, and after a failure does not try
 //!   again for [`FAILURE_TTL`], so an offline user is slowed down once a minute at most.
 //!
-//! The database and collection come from the words already typed, then from `FSQ_PROJECT` /
-//! `FSQ_DATABASE`. Answers are cached for [`CACHE_TTL`] under
-//! `$XDG_CACHE_HOME/fsq/<project>/<database>/` (`~/.cache` when unset).
+//! The database and collection come from the words already typed, then from `FIRECTL_PROJECT` /
+//! `FIRECTL_DATABASE`. Answers are cached for [`CACHE_TTL`] under
+//! `$XDG_CACHE_HOME/firectl/<project>/<database>/` (`~/.cache` when unset).
 //!
 //! # Reliance on `clap_complete` internals
 //! This is built on `clap_complete`'s `unstable-dynamic` feature, which is why the crate
@@ -46,10 +46,10 @@ use crate::grpc;
 use crate::parse::unquoted;
 use crate::port::Firestore;
 
-/// The environment variable that turns `fsq` into a completion helper (`FSQ_COMPLETE=zsh
-/// fsq` prints the registration script). Not the `clap_complete` default, `COMPLETE`: a
+/// The environment variable that turns `firectl` into a completion helper (`FIRECTL_COMPLETE=zsh
+/// firectl` prints the registration script). Not the `clap_complete` default, `COMPLETE`: a
 /// stray `COMPLETE` in someone's environment must not hijack the program.
-pub const COMPLETE_VAR: &str = "FSQ_COMPLETE";
+pub const COMPLETE_VAR: &str = "FIRECTL_COMPLETE";
 
 const DEADLINE: Duration = Duration::from_secs(2);
 const CACHE_TTL: Duration = Duration::from_mins(10);
@@ -58,15 +58,15 @@ const SAMPLE_SIZE: NonZeroU32 = NonZeroU32::new(20).unwrap();
 const MAX_FIELD_DEPTH: usize = 3;
 
 /// bash (made safe for field names that are not plain words, see [`bash`]) and zsh: the
-/// shells `fsq completions` documents; the others `clap_complete` knows are not registered.
+/// shells `firectl completions` documents; the others `clap_complete` knows are not registered.
 #[must_use]
 pub fn shells() -> Shells<'static> {
-    Shells(&[&bash::FsqBash, &Zsh])
+    Shells(&[&bash::FirectlBash, &Zsh])
 }
 
 #[must_use]
 pub fn registration_line(shell: CompletionShell) -> String {
-    format!("source <({COMPLETE_VAR}={} fsq)", shell.name())
+    format!("source <({COMPLETE_VAR}={} firectl)", shell.name())
 }
 
 #[must_use]
@@ -491,10 +491,10 @@ struct Cache {
 }
 
 impl Cache {
-    /// `<base>/fsq/<project>/<database>`, below `emulator-<host>` for an emulator.
+    /// `<base>/firectl/<project>/<database>`, below `emulator-<host>` for an emulator.
     fn new(base: &Path, target: &DbTarget, emulator: Option<&str>) -> Self {
         let database = base
-            .join("fsq")
+            .join("firectl")
             .join(target.project.as_str())
             .join(target.database.as_str());
         Self {
@@ -773,9 +773,13 @@ mod tests {
     fn cache_directories_are_private() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let leaf = dir.path().join("fsq/p/d");
+        let leaf = dir.path().join("firectl/p/d");
         cache_in(&leaf).write("x", at(1), &found(&[]));
-        for created in [&leaf, &dir.path().join("fsq/p"), &dir.path().join("fsq")] {
+        for created in [
+            &leaf,
+            &dir.path().join("firectl/p"),
+            &dir.path().join("firectl"),
+        ] {
             let mode = fs::metadata(created).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o700, "{}", created.display());
         }
@@ -790,11 +794,11 @@ mod tests {
         let base = Path::new("/c");
         assert_eq!(
             Cache::new(base, &target, None).file("collections"),
-            Path::new("/c/fsq/p/(default)/collections.json")
+            Path::new("/c/firectl/p/(default)/collections.json")
         );
         assert_eq!(
             Cache::new(base, &target, Some("localhost:8080")).file("collections"),
-            Path::new("/c/fsq/p/(default)/emulator-localhost%3A8080/collections.json")
+            Path::new("/c/firectl/p/(default)/emulator-localhost%3A8080/collections.json")
         );
     }
 
@@ -899,7 +903,7 @@ mod tests {
 
     #[test]
     fn completer_is_silent_without_project() {
-        let inv = Invocation::new(&words("fsq query users --where"), &no_env);
+        let inv = Invocation::new(&words("firectl query users --where"), &no_env);
         assert_eq!(inv.target, None);
         assert_eq!(
             values(&collection_candidates(&inv, "", at(0), no_collections)),
@@ -918,7 +922,7 @@ mod tests {
             values(&collection_candidates(&empty, "", at(0), no_collections)),
             none()
         );
-        let blank = Invocation::new(&words("fsq query"), &|_: &str| Some(String::new()));
+        let blank = Invocation::new(&words("firectl query"), &|_: &str| Some(String::new()));
         assert_eq!(blank.target, None);
         assert_eq!(blank.emulator, None);
     }
@@ -931,18 +935,21 @@ mod tests {
             detached,
         };
         assert_eq!(
-            typed("fsq -- fsq query us --all", Some(2)),
-            line(&["fsq", "query", "", "--all"], false)
+            typed("firectl -- firectl query us --all", Some(2)),
+            line(&["firectl", "query", "", "--all"], false)
         );
         assert_eq!(
-            typed("fsq -- fsq query", None),
-            line(&["fsq", "query"], false)
+            typed("firectl -- firectl query", None),
+            line(&["firectl", "query"], false)
         );
-        assert_eq!(typed("fsq", Some(0)), line(&[], false));
+        assert_eq!(typed("firectl", Some(0)), line(&[], false));
         assert_eq!(
-            typed("fsq -- fsq query users --where X --project p", Some(4)),
+            typed(
+                "firectl -- firectl query users --where X --project p",
+                Some(4)
+            ),
             line(
-                &["fsq", "query", "users", "--where", "", "--project", "p"],
+                &["firectl", "query", "users", "--where", "", "--project", "p"],
                 false
             )
         );
@@ -953,16 +960,23 @@ mod tests {
         let typed = |line: &str, index| typed_words(words(line).into_iter(), index);
         // `--project=p query users --order-by age:d`, bash style.
         let split = typed(
-            "fsq -- fsq --project = p query users --order-by age : d",
+            "firectl -- firectl --project = p query users --order-by age : d",
             Some(9),
         );
         assert!(split.detached);
         assert_eq!(
             split.words,
-            ["fsq", "--project=p", "query", "users", "--order-by", "age:"]
+            [
+                "firectl",
+                "--project=p",
+                "query",
+                "users",
+                "--order-by",
+                "age:"
+            ]
         );
-        assert!(typed("fsq -- fsq --set a = x", Some(4)).detached);
-        assert!(!typed("fsq -- fsq query x", Some(2)).detached);
+        assert!(typed("firectl -- firectl --set a = x", Some(4)).detached);
+        assert!(!typed("firectl -- firectl query x", Some(2)).detached);
         assert_eq!(
             rejoin_split_words(words("--database = d : x")),
             ["--database=d:x"]
@@ -994,59 +1008,65 @@ mod tests {
         let some = |t: &str, s: &str| (Some(t.to_owned()), Some(s.to_owned()));
         let target_only = |t: &str| (Some(t.to_owned()), None);
         assert_eq!(
-            hints("fsq --project p query users --where", &[]),
+            hints("firectl --project p query users --where", &[]),
             some("p/(default)", "collection users")
         );
         assert_eq!(
-            hints("fsq query users --project p --database d --where", &[]),
+            hints("firectl query users --project p --database d --where", &[]),
             some("p/d", "collection users")
         );
         assert_eq!(
-            hints("fsq query --project=p --database=d users", &[]),
+            hints("firectl query --project=p --database=d users", &[]),
             some("p/d", "collection users")
         );
         assert_eq!(
             hints(
-                "fsq query users --where",
-                &[("FSQ_PROJECT", "ep"), ("FSQ_DATABASE", "ed")]
+                "firectl query users --where",
+                &[("FIRECTL_PROJECT", "ep"), ("FIRECTL_DATABASE", "ed")]
             ),
             some("ep/ed", "collection users")
         );
         assert_eq!(
             hints(
-                "fsq --project p query users --where",
-                &[("FSQ_PROJECT", "ep")]
+                "firectl --project p query users --where",
+                &[("FIRECTL_PROJECT", "ep")]
             ),
             some("p/(default)", "collection users")
         );
         assert_eq!(
-            hints("fsq --project p query --group orders --where", &[]),
+            hints("firectl --project p query --group orders --where", &[]),
             some("p/(default)", "group orders")
         );
         assert_eq!(
-            hints("fsq --project p query users/u1 --group orders", &[]),
+            hints("firectl --project p query users/u1 --group orders", &[]),
             some("p/(default)", "group orders under users/u1")
         );
         assert_eq!(
-            hints("fsq --project p count users/u1/orders --sum", &[]),
+            hints("firectl --project p count users/u1/orders --sum", &[]),
             some("p/(default)", "collection users/u1/orders")
         );
         assert_eq!(
-            hints("fsq --project p update users/u1 --set", &[]),
+            hints("firectl --project p update users/u1 --set", &[]),
             some("p/(default)", "collection users")
         );
         assert_eq!(
-            hints("fsq --project p query --where a --limit zero users", &[])
-                .1
-                .as_deref(),
+            hints(
+                "firectl --project p query --where a --limit zero users",
+                &[]
+            )
+            .1
+            .as_deref(),
             Some("collection users")
         );
         assert_eq!(
-            hints("fsq --project p query", &[]),
+            hints("firectl --project p query", &[]),
             target_only("p/(default)")
         );
-        assert_eq!(hints("fsq --project p", &[]), target_only("p/(default)"));
-        assert_eq!(hints("fsq --project Bad query users", &[]).0, None);
+        assert_eq!(
+            hints("firectl --project p", &[]),
+            target_only("p/(default)")
+        );
+        assert_eq!(hints("firectl --project Bad query users", &[]).0, None);
     }
 
     fn position(kind: FieldKind, current: &str) -> Vec<String> {
@@ -1135,17 +1155,17 @@ mod tests {
     fn registration_line_names_the_variable_and_the_shell() {
         assert_eq!(
             registration_line(CompletionShell::Zsh),
-            "source <(FSQ_COMPLETE=zsh fsq)"
+            "source <(FIRECTL_COMPLETE=zsh firectl)"
         );
         assert_eq!(
             registration_line(CompletionShell::Bash),
-            "source <(FSQ_COMPLETE=bash fsq)"
+            "source <(FIRECTL_COMPLETE=bash firectl)"
         );
     }
 
     #[test]
     fn a_leading_shell_quote_is_ignored() {
-        let inv = Invocation::new(&words("fsq query users"), &no_env);
+        let inv = Invocation::new(&words("firectl query users"), &no_env);
         assert_eq!(
             values(&field_candidates(
                 &inv,
@@ -1172,7 +1192,7 @@ mod tests {
     fn after_a_bash_split_nothing_is_offered() {
         let inv = Invocation {
             detached: true,
-            ..Invocation::new(&words("fsq --project p query users"), &no_env)
+            ..Invocation::new(&words("firectl --project p query users"), &no_env)
         };
         assert_eq!(
             values(&collection_candidates(&inv, "x", at(0), no_collections)),
@@ -1193,7 +1213,7 @@ mod tests {
     #[test]
     fn the_cursor_word_does_not_hide_later_flags() {
         let typed = typed_words(
-            words("fsq -- fsq query users --where X --project p").into_iter(),
+            words("firectl -- firectl query users --where X --project p").into_iter(),
             Some(4),
         );
         let inv = Invocation::new(&typed.words, &no_env);
@@ -1217,7 +1237,7 @@ mod tests {
 
     #[test]
     fn literal_candidates_need_no_database() {
-        let inv = Invocation::new(&words("fsq query users"), &no_env);
+        let inv = Invocation::new(&words("firectl query users"), &no_env);
         assert_eq!(
             values(&field_candidates(
                 &inv,
@@ -1236,7 +1256,7 @@ mod tests {
             "FIRESTORE_EMULATOR_HOST" => emulator.map(str::to_owned),
             _ => None,
         };
-        let inv = Invocation::new(&words("fsq --project p query users"), &env);
+        let inv = Invocation::new(&words("firectl --project p query users"), &env);
         let scope = inv.scope.clone().unwrap();
         inv.cache()
             .unwrap()
@@ -1283,7 +1303,7 @@ mod tests {
     fn a_cache_miss_looks_up_once_with_the_typed_database_and_collection() {
         let dir = tempfile::tempdir().unwrap();
         let env = |name: &str| (name == "XDG_CACHE_HOME").then(|| dir.path().display().to_string());
-        let inv = Invocation::new(&words("fsq --project p --database d query users"), &env);
+        let inv = Invocation::new(&words("firectl --project p --database d query users"), &env);
         let seen = std::cell::RefCell::new(Vec::new());
         let fields = |target: &DbTarget, scope: &Scope| {
             seen.borrow_mut()
@@ -1325,7 +1345,7 @@ mod tests {
                 "FIRESTORE_EMULATOR_HOST" => emulator.map(str::to_owned),
                 _ => None,
             };
-            Invocation::new(&words("fsq --project p query users"), &env)
+            Invocation::new(&words("firectl --project p query users"), &env)
                 .cache()
                 .unwrap()
         };

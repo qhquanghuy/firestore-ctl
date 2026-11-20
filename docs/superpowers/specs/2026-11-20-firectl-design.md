@@ -1,4 +1,4 @@
-# fsq — Firestore query CLI — Design
+# firectl — Firestore query CLI — Design
 
 Date: 2026-11-20
 Status: Approved (design); builder-check questions resolved
@@ -7,7 +7,7 @@ Status: Approved (design); builder-check questions resolved
 
 There is no CLI way to read Firestore documents. `gcloud firestore` and the
 Firebase CLI only manage databases, indexes and import/export, and raw REST
-calls are verbose. `fsq` is a small CLI client for Firestore, in the spirit of
+calls are verbose. `firectl` is a small CLI client for Firestore, in the spirit of
 psql/mongosh but shaped for one-shot use.
 
 **Users:** the author and LLM coding agents. Typical use is simple: filter a
@@ -15,8 +15,8 @@ collection by one or two fields, fetch a document, count things, and
 occasionally fix up a single document.
 
 **Targets:** Firestore **native mode, Standard edition**, named databases (not
-`(default)`), e.g. `app-db` (asia-southeast1) and
-`jobs-db` (asia-northeast1). MongoDB compatibility is not
+`(default)`), e.g. `app-db` and
+`jobs-db`. MongoDB compatibility is not
 available on these databases, which is why this tool exists.
 
 ## Goals
@@ -43,7 +43,7 @@ available on these databases, which is why this tool exists.
 
 - An agent must never be able to modify data without the human having enabled
   writes for that database. Any write path that
-  bypasses `FSQ_WRITABLE`, or that silently corrupts types on round-trip, is a
+  bypasses `FIRECTL_WRITABLE`, or that silently corrupts types on round-trip, is a
   failure even if it works.
 - Not a schema/index management tool; indexes are owned by the team's normal
   deployment process (e.g. `firestore.indexes.json`).
@@ -60,7 +60,7 @@ available on these databases, which is why this tool exists.
   author's machine, so the tool must either use ADC (and tell the user to run
   `gcloud auth application-default login`) or fall back to
   `gcloud auth print-access-token`.
-- Lives in `<repo>` (currently empty).
+- Lives at the repository root.
 
 ## Approaches considered
 
@@ -88,25 +88,25 @@ Implementation stack:
 
 ### Connection
 
-- `--project <id>` / `--database <name>` flags, or `FSQ_PROJECT` /
-  `FSQ_DATABASE` env vars. Flags win. Database defaults to `(default)` if
+- `--project <id>` / `--database <name>` flags, or `FIRECTL_PROJECT` /
+  `FIRECTL_DATABASE` env vars. Flags win. Database defaults to `(default)` if
   unset.
 
 ### Commands
 
 ```bash
-fsq get users/abc123
-fsq query users --where 'status == active' --where 'age >= 18' \
+firectl get users/abc123
+firectl query users --where 'status == active' --where 'age >= 18' \
     --order-by createdAt:desc --limit 10 [--offset N] [--select name,plan]
-fsq query orders --group --where 'total > 100'     # collection group
-fsq count users --where 'plan == pro'              # also --sum <field>, --avg <field>
-fsq collections [users/abc123]                      # top-level or subcollections
-fsq indexes users                                   # composite indexes + state
-fsq set users/u1 --data '{"name":"Ann"}'            # create only; fails if exists
-fsq set users/u1 --data @doc.json --overwrite       # replace existing document
-fsq set users/u1 --data '{"plan":"pro"}' --merge    # merge given fields
-fsq update users/u1 --set plan=pro --set 'tags+=vip'
-fsq delete users/u1
+firectl query orders --group --where 'total > 100'     # collection group
+firectl count users --where 'plan == pro'              # also --sum <field>, --avg <field>
+firectl collections [users/abc123]                      # top-level or subcollections
+firectl indexes users                                   # composite indexes + state
+firectl set users/u1 --data '{"name":"Ann"}'            # create only; fails if exists
+firectl set users/u1 --data @doc.json --overwrite       # replace existing document
+firectl set users/u1 --data '{"plan":"pro"}' --merge    # merge given fields
+firectl update users/u1 --set plan=pro --set 'tags+=vip'
+firectl delete users/u1
 ```
 
 - Paths are slash paths: odd segment count = collection, even = document.
@@ -118,7 +118,7 @@ fsq delete users/u1
   `field-=value` (array-remove). Field deletion and increment are left to the
   builder to decide syntax for, or defer.
 - No `--write` flag: the command name already says it is a write. Write
-  permission comes from `FSQ_WRITABLE` (see Writes and safety).
+  permission comes from `FIRECTL_WRITABLE` (see Writes and safety).
 
 ### Values
 
@@ -175,7 +175,7 @@ stay plain.
 ### Writes and safety
 
 - **Reads always allowed. Writes allowed only on databases listed in
-  `FSQ_WRITABLE`**, a comma-separated list set by the human in their own
+  `FIRECTL_WRITABLE`**, a comma-separated list set by the human in their own
   shell profile. Entries are either `<database>` (that name in any project) or
   `<project>/<database>` (exact). No wildcard. Unset/empty = read-only
   everywhere.
@@ -206,14 +206,14 @@ stay plain.
 
 ### Completion
 
-- `fsq completions zsh|bash` installs/prints completion scripts.
+- `firectl completions zsh|bash` installs/prints completion scripts.
 - Dynamic completion of collection names (positional path) and field names
   (`--where`, `--order-by`, `--select`, `--set`). Field names come from
   sampling a few documents; results cached locally with a short TTL.
 
 ### Build
 
-- Cargo project at the repo root (or `fsq/` subdirectory — builder's call).
+- Cargo project at the repo root (or `firectl/` subdirectory — builder's call).
 - `flake.nix` with a devShell (rust toolchain, rust-analyzer, plus whatever
   native deps the crates need) and a package output (e.g. via crane).
 

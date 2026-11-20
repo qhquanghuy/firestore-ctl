@@ -28,7 +28,7 @@ use crate::render::{Format, Layout, RenderOpts, Typing};
 const DEFAULT_LIMIT: NonZeroU32 = NonZeroU32::new(100).unwrap();
 
 const SEE_ROOT_HELP: &str =
-    "Value syntax, field quoting, typed JSON tags and exit codes: run `fsq --help`.";
+    "Value syntax, field quoting, typed JSON tags and exit codes: run `firectl --help`.";
 
 const LONG_HELP: &str = r#"Values (--where, --set, lists):
   null  true  false     literals
@@ -85,14 +85,14 @@ Concurrency:
   document changed meanwhile. --force skips this and writes anyway.
 
 Environment:
-  FSQ_PROJECT    default for --project
-  FSQ_DATABASE   default for --database (otherwise "(default)")
+  FIRECTL_PROJECT    default for --project
+  FIRECTL_DATABASE   default for --database (otherwise "(default)")
   Flags win over environment variables.
 
 Completion:
-  Add `source <(FSQ_COMPLETE=zsh fsq)` (or `FSQ_COMPLETE=bash`) to your rc file. TAB then
+  Add `source <(FIRECTL_COMPLETE=zsh firectl)` (or `FIRECTL_COMPLETE=bash`) to your rc file. TAB then
   completes collection ids and field names from the database (needs --project or
-  FSQ_PROJECT; answers are cached for 10 minutes in $XDG_CACHE_HOME/fsq).
+  FIRECTL_PROJECT; answers are cached for 10 minutes in $XDG_CACHE_HOME/firectl).
 
 Output:
   A table on a terminal, JSON otherwise (indented on a terminal, compact in a pipe);
@@ -119,7 +119,7 @@ Exit codes:
 /// Reads work everywhere; writes (`set`, `update`, `delete`) work only on databases
 /// the operator has enabled for writing, and fail with exit code 6 otherwise.
 #[derive(Debug, Parser)]
-#[command(name = "fsq", version, after_long_help = LONG_HELP)]
+#[command(name = "firectl", version, after_long_help = LONG_HELP)]
 pub struct Cli {
     #[command(flatten)]
     pub conn: ConnArgs,
@@ -132,18 +132,18 @@ pub struct Cli {
 #[derive(Debug, Clone, Args)]
 #[command(next_help_heading = "Global options")]
 pub struct ConnArgs {
-    /// Google Cloud project id. Default: the `FSQ_PROJECT` environment variable; required
+    /// Google Cloud project id. Default: the `FIRECTL_PROJECT` environment variable; required
     /// unless that is set.
     #[arg(long, global = true, value_name = "PROJECT")]
     pub project: Option<ProjectId>,
-    /// Firestore database id. Default: the `FSQ_DATABASE` environment variable, else
+    /// Firestore database id. Default: the `FIRECTL_DATABASE` environment variable, else
     /// `(default)`.
     #[arg(long, global = true, value_name = "DATABASE")]
     pub database: Option<DatabaseId>,
 }
 
 impl ConnArgs {
-    /// Flags first, then `FSQ_PROJECT` / `FSQ_DATABASE` from `env` (empty counts as unset), then
+    /// Flags first, then `FIRECTL_PROJECT` / `FIRECTL_DATABASE` from `env` (empty counts as unset), then
     /// `(default)` for the database. `None` when no project is given anywhere.
     ///
     /// # Errors
@@ -162,8 +162,9 @@ impl ConnArgs {
                     .transpose(),
             }
         }
-        let project = resolve(self.project.as_ref(), "FSQ_PROJECT", &env)?;
-        let database = resolve(self.database.as_ref(), "FSQ_DATABASE", &env)?.unwrap_or_default();
+        let project = resolve(self.project.as_ref(), "FIRECTL_PROJECT", &env)?;
+        let database =
+            resolve(self.database.as_ref(), "FIRECTL_DATABASE", &env)?.unwrap_or_default();
         Ok(project.map(|project| DbTarget { project, database }))
     }
 }
@@ -388,7 +389,7 @@ pub enum Cmd {
     Set {
         /// Document path, e.g. `users/u1`.
         path: DocPath,
-        /// JSON (typed, see `fsq --help`): inline, `@file.json`, or `-` for stdin.
+        /// JSON (typed, see `firectl --help`): inline, `@file.json`, or `-` for stdin.
         #[arg(long, value_name = "JSON|@FILE|-")]
         data: DataArg,
         /// Replace the document if it exists.
@@ -698,7 +699,7 @@ mod tests {
 
     fn request_with_stdin(args: &[&str], stdin: &str) -> Result<Request, AppError> {
         Cli::try_parse_from(
-            ["fsq", "--project", "p"]
+            ["firectl", "--project", "p"]
                 .into_iter()
                 .chain(args.iter().copied()),
         )
@@ -740,8 +741,8 @@ mod tests {
                 .map(Limit::get),
             Some(5)
         );
-        assert!(Cli::try_parse_from(["fsq", "query", "u", "--all", "--limit", "5"]).is_err());
-        assert!(Cli::try_parse_from(["fsq", "query", "u", "--limit", "0"]).is_err());
+        assert!(Cli::try_parse_from(["firectl", "query", "u", "--all", "--limit", "5"]).is_err());
+        assert!(Cli::try_parse_from(["firectl", "query", "u", "--limit", "0"]).is_err());
     }
 
     #[test]
@@ -842,7 +843,7 @@ mod tests {
         );
         assert!(
             Cli::try_parse_from([
-                "fsq",
+                "firectl",
                 "set",
                 "u/1",
                 "--data",
@@ -867,15 +868,17 @@ mod tests {
             panic!("not a set")
         };
         assert_eq!(from_stdin.data, expected);
-        let dir = std::env::temp_dir().join(format!("fsq-cli-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("firectl-cli-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("doc.json");
         fs::write(&file, r#"{"a":1}"#).unwrap();
         let arg = format!("@{}", file.display());
         assert_eq!(set_of(&["set", "users/u1", "--data", &arg]).data, expected);
         fs::remove_dir_all(&dir).unwrap();
-        let missing = request(&["set", "users/u1", "--data", "@/nonexistent/fsq.json"]);
-        assert!(matches!(missing, Err(AppError::Input(m)) if m.contains("/nonexistent/fsq.json")));
+        let missing = request(&["set", "users/u1", "--data", "@/nonexistent/firectl.json"]);
+        assert!(
+            matches!(missing, Err(AppError::Input(m)) if m.contains("/nonexistent/firectl.json"))
+        );
     }
 
     #[test]
@@ -976,7 +979,7 @@ mod tests {
         ] {
             assert!(
                 Cli::try_parse_from(
-                    ["fsq", "--project", "p"]
+                    ["firectl", "--project", "p"]
                         .into_iter()
                         .chain(args.iter().copied())
                 )
@@ -990,7 +993,7 @@ mod tests {
     fn target_resolves_flags_then_env_then_default() {
         let no_env = |_: &str| None;
         let parse = |args: &[&str]| {
-            Cli::try_parse_from(["fsq"].into_iter().chain(args.iter().copied()))
+            Cli::try_parse_from(["firectl"].into_iter().chain(args.iter().copied()))
                 .unwrap()
                 .conn
         };
@@ -998,8 +1001,8 @@ mod tests {
             t.map(|t| t.map(|t| format!("{}/{}", t.project, t.database)))
         };
         let env = |name: &str| match name {
-            "FSQ_PROJECT" => Some("ep".to_owned()),
-            "FSQ_DATABASE" => Some("ed".to_owned()),
+            "FIRECTL_PROJECT" => Some("ep".to_owned()),
+            "FIRECTL_DATABASE" => Some("ed".to_owned()),
             _ => None,
         };
         let empty = |_: &str| Some(String::new());
@@ -1013,14 +1016,14 @@ mod tests {
         assert_eq!(show(conn.target(no_env)), Ok(Some("p/(default)".into())));
         assert_eq!(show(conn.target(empty)), Ok(Some("p/(default)".into())));
         let bad = |_: &str| Some("Bad Name".to_owned());
-        assert!(matches!(conn.target(bad), Err(m) if m.contains("FSQ_DATABASE")));
+        assert!(matches!(conn.target(bad), Err(m) if m.contains("FIRECTL_DATABASE")));
     }
 
     #[test]
     fn render_opts_map_flags() {
         let opts = |args: &[&str], tty| {
             Cli::try_parse_from(
-                ["fsq", "get", "u/1"]
+                ["firectl", "get", "u/1"]
                     .into_iter()
                     .chain(args.iter().copied()),
             )
@@ -1043,7 +1046,7 @@ mod tests {
 
     #[test]
     fn completions_is_not_a_request() {
-        let cli = Cli::try_parse_from(["fsq", "completions", "bash"]).unwrap();
+        let cli = Cli::try_parse_from(["firectl", "completions", "bash"]).unwrap();
         assert!(matches!(cli.into_request(empty()), Err(AppError::Input(_))));
     }
 
@@ -1151,7 +1154,7 @@ mod tests {
     fn force_conflicts_with_an_explicit_guard_and_needs_a_mode() {
         let parse = |args: &[&str]| {
             Cli::try_parse_from(
-                ["fsq", "set", "u/1", "--data", "{}"]
+                ["firectl", "set", "u/1", "--data", "{}"]
                     .into_iter()
                     .chain(args.iter().copied()),
             )
@@ -1173,7 +1176,7 @@ mod tests {
     fn only_a_plain_query_uses_the_default_limit() {
         let default = |args: &[&str]| {
             Cli::try_parse_from(
-                ["fsq", "--project", "p"]
+                ["firectl", "--project", "p"]
                     .into_iter()
                     .chain(args.iter().copied()),
             )

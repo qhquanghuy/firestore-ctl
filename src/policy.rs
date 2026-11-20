@@ -1,5 +1,5 @@
 //! The write gate: writes are possible only on databases the human listed in
-//! `FSQ_WRITABLE`. [`WriteAccess`] can only be obtained from [`WritePolicy::authorize`],
+//! `FIRECTL_WRITABLE`. [`WriteAccess`] can only be obtained from [`WritePolicy::authorize`],
 //! so any code that writes must take one.
 
 use std::str::FromStr;
@@ -26,14 +26,14 @@ impl WritableEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PolicyError {
-    #[error("FSQ_WRITABLE entry `{0}`: wildcards are not allowed; list databases explicitly")]
+    #[error("FIRECTL_WRITABLE entry `{0}`: wildcards are not allowed; list databases explicitly")]
     Wildcard(String),
     #[error(
-        "FSQ_WRITABLE entry `(default)`: name the project, e.g. `my-project/(default)`; \
+        "FIRECTL_WRITABLE entry `(default)`: name the project, e.g. `my-project/(default)`; \
          a bare `(default)` would allow writes to every project's default database"
     )]
     BareDefault,
-    #[error("FSQ_WRITABLE entry `{entry}`: {reason}")]
+    #[error("FIRECTL_WRITABLE entry `{entry}`: {reason}")]
     Invalid { entry: String, reason: IdError },
 }
 

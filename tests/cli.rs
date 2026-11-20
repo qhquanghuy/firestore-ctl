@@ -8,34 +8,34 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use predicates::str::contains;
 
-fn fsq() -> Command {
-    let mut cmd = Command::cargo_bin("fsq").expect("fsq binary builds");
+fn firectl() -> Command {
+    let mut cmd = Command::cargo_bin("firectl").expect("firectl binary builds");
     // Never reach a real project: a test that gets as far as connecting hits a dead port.
     // Nor the real completion cache: nothing can be created below `/dev/null`.
     cmd.env("FIRESTORE_EMULATOR_HOST", "127.0.0.1:1")
-        .env("XDG_CACHE_HOME", "/dev/null/fsq-test-cache")
+        .env("XDG_CACHE_HOME", "/dev/null/firectl-test-cache")
         .env_remove("COMPLETE")
-        .env_remove("FSQ_COMPLETE")
-        .env_remove("FSQ_PROJECT")
-        .env_remove("FSQ_DATABASE")
-        .env_remove("FSQ_WRITABLE");
+        .env_remove("FIRECTL_COMPLETE")
+        .env_remove("FIRECTL_PROJECT")
+        .env_remove("FIRECTL_DATABASE")
+        .env_remove("FIRECTL_WRITABLE");
     cmd
 }
 
 #[test]
 fn help_lists_commands_and_exit_codes() {
-    fsq().arg("--help").assert().success().stdout(
+    firectl().arg("--help").assert().success().stdout(
         contains("query")
             .and(contains("exit codes"))
-            .and(contains("FSQ_WRITABLE").not()),
+            .and(contains("FIRECTL_WRITABLE").not()),
     );
 }
 
 #[test]
 fn help_documents_value_syntax_and_env() {
-    fsq().arg("--help").assert().success().stdout(
-        contains("FSQ_PROJECT")
-            .and(contains("FSQ_DATABASE"))
+    firectl().arg("--help").assert().success().stdout(
+        contains("FIRECTL_PROJECT")
+            .and(contains("FIRECTL_DATABASE"))
             .and(contains("ts:"))
             .and(contains("ref:"))
             .and(contains("leading zeros"))
@@ -63,17 +63,17 @@ fn no_subcommand_help_mentions_writable() {
         "update",
         "delete",
     ] {
-        fsq()
+        firectl()
             .args([sub, "--help"])
             .assert()
             .success()
-            .stdout(contains("FSQ_WRITABLE").not());
+            .stdout(contains("FIRECTL_WRITABLE").not());
     }
 }
 
 #[test]
 fn bad_filter_is_usage_error() {
-    fsq()
+    firectl()
         .args([
             "--project",
             "p",
@@ -88,7 +88,7 @@ fn bad_filter_is_usage_error() {
 
 #[test]
 fn get_requires_doc_path() {
-    fsq()
+    firectl()
         .args(["--project", "p", "get", "users"])
         .assert()
         .code(2);
@@ -96,7 +96,7 @@ fn get_requires_doc_path() {
 
 #[test]
 fn missing_project_is_usage_error() {
-    fsq()
+    firectl()
         .args(["get", "users/u1"])
         .assert()
         .code(2)
@@ -105,8 +105,8 @@ fn missing_project_is_usage_error() {
 
 #[test]
 fn write_denied_without_network() {
-    fsq()
-        .env_remove("FSQ_WRITABLE")
+    firectl()
+        .env_remove("FIRECTL_WRITABLE")
         .args(["--project", "p", "--database", "d", "delete", "users/u1"])
         .assert()
         .code(6)
@@ -115,9 +115,9 @@ fn write_denied_without_network() {
 
 #[test]
 fn write_denied_uses_env_project_and_database() {
-    fsq()
-        .env("FSQ_PROJECT", "envp")
-        .env("FSQ_DATABASE", "envd")
+    firectl()
+        .env("FIRECTL_PROJECT", "envp")
+        .env("FIRECTL_DATABASE", "envd")
         .args(["delete", "users/u1"])
         .assert()
         .code(6)
@@ -126,7 +126,7 @@ fn write_denied_uses_env_project_and_database() {
 
 #[test]
 fn overwrite_and_merge_conflict() {
-    fsq()
+    firectl()
         .args([
             "--project",
             "p",
@@ -143,7 +143,7 @@ fn overwrite_and_merge_conflict() {
 
 #[test]
 fn pretty_and_compact_conflict() {
-    fsq()
+    firectl()
         .args(["--project", "p", "--pretty", "--compact", "get", "users/u1"])
         .assert()
         .code(2);
@@ -151,7 +151,7 @@ fn pretty_and_compact_conflict() {
 
 #[test]
 fn if_unchanged_since_needs_overwrite_or_merge_on_set() {
-    fsq()
+    firectl()
         .args([
             "--project",
             "p",
@@ -168,7 +168,7 @@ fn if_unchanged_since_needs_overwrite_or_merge_on_set() {
 
 #[test]
 fn update_requires_a_change() {
-    fsq()
+    firectl()
         .args(["--project", "p", "update", "users/u1"])
         .assert()
         .code(2);
@@ -176,8 +176,8 @@ fn update_requires_a_change() {
 
 #[test]
 fn set_data_path_mismatch_is_an_input_error() {
-    fsq()
-        .env("FSQ_WRITABLE", "p/d")
+    firectl()
+        .env("FIRECTL_WRITABLE", "p/d")
         .args([
             "--project",
             "p",
@@ -196,8 +196,8 @@ fn set_data_path_mismatch_is_an_input_error() {
 
 #[test]
 fn set_data_decode_error_names_the_pointer() {
-    fsq()
-        .env("FSQ_WRITABLE", "p/d")
+    firectl()
+        .env("FIRECTL_WRITABLE", "p/d")
         .args([
             "--project",
             "p",
@@ -215,8 +215,8 @@ fn set_data_decode_error_names_the_pointer() {
 
 #[test]
 fn set_data_invalid_json_is_an_input_error() {
-    fsq()
-        .env("FSQ_WRITABLE", "p/d")
+    firectl()
+        .env("FIRECTL_WRITABLE", "p/d")
         .args([
             "--project",
             "p",
@@ -234,7 +234,7 @@ fn set_data_invalid_json_is_an_input_error() {
 
 #[test]
 fn count_rejects_duplicate_sum_fields() {
-    fsq()
+    firectl()
         .args([
             "--project",
             "p",
@@ -252,22 +252,22 @@ fn count_rejects_duplicate_sum_fields() {
 
 #[test]
 fn query_needs_a_collection_unless_grouped() {
-    fsq().args(["--project", "p", "query"]).assert().code(2);
+    firectl().args(["--project", "p", "query"]).assert().code(2);
 }
 
 #[test]
 fn completions_work_without_a_project() {
-    fsq()
+    firectl()
         .args(["completions", "bash"])
         .assert()
         .success()
-        .stdout(contains("fsq"));
+        .stdout(contains("firectl"));
 }
 
 #[test]
 fn malformed_writable_fails_writes_with_exit_1() {
-    fsq()
-        .env("FSQ_WRITABLE", "*")
+    firectl()
+        .env("FIRECTL_WRITABLE", "*")
         .args(["--project", "p", "delete", "users/u1"])
         .assert()
         .code(1)
@@ -278,8 +278,8 @@ fn malformed_writable_fails_writes_with_exit_1() {
 fn malformed_writable_does_not_block_reads() {
     // `query` on a document path is rejected while building the request (exit 2),
     // which is only reached if the policy error did not stop the command (exit 1).
-    fsq()
-        .env("FSQ_WRITABLE", "*")
+    firectl()
+        .env("FIRECTL_WRITABLE", "*")
         .args(["--project", "p", "query", "users/u1"])
         .assert()
         .code(2)
@@ -288,7 +288,7 @@ fn malformed_writable_does_not_block_reads() {
 
 #[test]
 fn denied_write_does_not_read_a_file() {
-    fsq()
+    firectl()
         .args([
             "--project",
             "p",
@@ -297,7 +297,7 @@ fn denied_write_does_not_read_a_file() {
             "set",
             "users/u1",
             "--data",
-            "@/nonexistent/fsq-data.json",
+            "@/nonexistent/firectl-data.json",
         ])
         .assert()
         .code(6)
@@ -309,9 +309,9 @@ fn denied_write_does_not_read_stdin() {
     use std::process::Stdio;
     use std::time::{Duration, Instant};
 
-    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("fsq"))
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("firectl"))
         .env("FIRESTORE_EMULATOR_HOST", "127.0.0.1:1")
-        .env_remove("FSQ_WRITABLE")
+        .env_remove("FIRECTL_WRITABLE")
         .args([
             "--project",
             "p",
@@ -343,13 +343,13 @@ fn denied_write_does_not_read_stdin() {
 
 #[test]
 fn empty_project_env_counts_as_unset() {
-    fsq()
-        .env("FSQ_PROJECT", "")
+    firectl()
+        .env("FIRECTL_PROJECT", "")
         .args(["completions", "bash"])
         .assert()
         .success();
-    fsq()
-        .env("FSQ_PROJECT", "")
+    firectl()
+        .env("FIRECTL_PROJECT", "")
         .args(["get", "users/u1"])
         .assert()
         .code(2)
@@ -358,8 +358,8 @@ fn empty_project_env_counts_as_unset() {
 
 #[test]
 fn empty_database_env_means_default() {
-    fsq()
-        .env("FSQ_DATABASE", "")
+    firectl()
+        .env("FIRECTL_DATABASE", "")
         .args(["--project", "p", "delete", "users/u1"])
         .assert()
         .code(6)
@@ -368,19 +368,19 @@ fn empty_database_env_means_default() {
 
 #[test]
 fn invalid_database_env_is_a_usage_error() {
-    fsq()
-        .env("FSQ_DATABASE", "Bad Name")
+    firectl()
+        .env("FIRECTL_DATABASE", "Bad Name")
         .args(["--project", "p", "get", "users/u1"])
         .assert()
         .code(2)
-        .stderr(contains("FSQ_DATABASE"));
+        .stderr(contains("FIRECTL_DATABASE"));
 }
 
 #[test]
 fn allowed_write_passes_authorization() {
     // Past the policy gate the bad --data is an input error (exit 2), not a denial (exit 6).
-    fsq()
-        .env("FSQ_WRITABLE", "p/d")
+    firectl()
+        .env("FIRECTL_WRITABLE", "p/d")
         .args([
             "--project",
             "p",
@@ -397,16 +397,24 @@ fn allowed_write_passes_authorization() {
 
 #[test]
 fn subcommand_help_is_self_sufficient() {
-    fsq().args(["query", "--help"]).assert().success().stdout(
-        contains("array-contains-any")
-            .and(contains("<field> <op> <value>"))
-            .and(contains("fsq --help")),
-    );
-    fsq().args(["update", "--help"]).assert().success().stdout(
-        contains("ARRAY-UNION")
-            .and(contains("ARRAY-REMOVE"))
-            .and(contains("fsq --help")),
-    );
+    firectl()
+        .args(["query", "--help"])
+        .assert()
+        .success()
+        .stdout(
+            contains("array-contains-any")
+                .and(contains("<field> <op> <value>"))
+                .and(contains("firectl --help")),
+        );
+    firectl()
+        .args(["update", "--help"])
+        .assert()
+        .success()
+        .stdout(
+            contains("ARRAY-UNION")
+                .and(contains("ARRAY-REMOVE"))
+                .and(contains("firectl --help")),
+        );
     for sub in [
         "get",
         "count",
@@ -416,17 +424,17 @@ fn subcommand_help_is_self_sufficient() {
         "delete",
         "completions",
     ] {
-        fsq()
+        firectl()
             .args([sub, "--help"])
             .assert()
             .success()
-            .stdout(contains("run `fsq --help`"));
+            .stdout(contains("run `firectl --help`"));
     }
 }
 
 #[test]
 fn global_flags_have_their_own_help_section() {
-    fsq()
+    firectl()
         .args(["get", "--help"])
         .assert()
         .success()
@@ -437,8 +445,8 @@ fn global_flags_have_their_own_help_section() {
 // authorization all passed) and fail there, without touching any real service.
 #[test]
 fn authorized_write_to_an_unreachable_endpoint_exits_1_not_6() {
-    fsq()
-        .env("FSQ_WRITABLE", "p/d")
+    firectl()
+        .env("FIRECTL_WRITABLE", "p/d")
         .timeout(std::time::Duration::from_secs(10))
         .args(["--project", "p", "--database", "d", "delete", "users/u1"])
         .assert()
@@ -450,7 +458,7 @@ fn authorized_write_to_an_unreachable_endpoint_exits_1_not_6() {
 
 #[test]
 fn read_from_an_unreachable_endpoint_exits_1() {
-    fsq()
+    firectl()
         .timeout(std::time::Duration::from_secs(10))
         .args(["--project", "p", "--database", "d", "get", "users/u1"])
         .assert()
@@ -460,8 +468,8 @@ fn read_from_an_unreachable_endpoint_exits_1() {
 
 #[test]
 fn overlapping_update_paths_are_a_usage_error() {
-    fsq()
-        .env("FSQ_WRITABLE", "p/d")
+    firectl()
+        .env("FIRECTL_WRITABLE", "p/d")
         .args([
             "--project",
             "p",
@@ -479,15 +487,15 @@ fn overlapping_update_paths_are_a_usage_error() {
         .stderr(contains("conflicting changes to `a` and `a.b`"));
 }
 
-/// What the bash script sends: `FSQ_COMPLETE=bash`, the words after `--`, the index of the
+/// What the bash script sends: `FIRECTL_COMPLETE=bash`, the words after `--`, the index of the
 /// word being completed and the line up to the cursor.
 fn completion_line(words: &[&str], line: Option<&str>) -> Command {
-    let mut cmd = fsq();
-    cmd.env("FSQ_COMPLETE", "bash")
+    let mut cmd = firectl();
+    cmd.env("FIRECTL_COMPLETE", "bash")
         .env("_CLAP_COMPLETE_INDEX", (words.len() - 1).to_string())
         .env("_CLAP_IFS", "\n")
         .env(
-            "_FSQ_COMP_LINE",
+            "_FIRECTL_COMP_LINE",
             line.map_or_else(|| words.join(" "), str::to_owned),
         )
         .arg("--")
@@ -502,27 +510,30 @@ fn completion(words: &[&str]) -> Command {
 #[test]
 fn completions_prints_the_registration_line() {
     for shell in ["bash", "zsh"] {
-        fsq()
+        firectl()
             .args(["completions", shell])
             .assert()
             .success()
-            .stdout(format!("source <(FSQ_COMPLETE={shell} fsq)\n"));
+            .stdout(format!("source <(FIRECTL_COMPLETE={shell} firectl)\n"));
     }
-    fsq().args(["completions", "tcsh"]).assert().code(2);
+    firectl().args(["completions", "tcsh"]).assert().code(2);
 }
 
 #[test]
 fn registration_script_calls_back_into_the_binary() {
     let script = |shell: &str| {
-        let out = fsq().env("FSQ_COMPLETE", shell).assert().success();
+        let out = firectl().env("FIRECTL_COMPLETE", shell).assert().success();
         String::from_utf8(out.get_output().stdout.clone()).unwrap()
     };
     let zsh = script("zsh");
-    assert!(zsh.contains("FSQ_COMPLETE") && zsh.contains("fsq"), "{zsh}");
+    assert!(
+        zsh.contains("FIRECTL_COMPLETE") && zsh.contains("firectl"),
+        "{zsh}"
+    );
     // The bash script also tells the binary where the cursor is, to quote candidates.
     let bash = script("bash");
     assert!(
-        bash.contains("FSQ_COMPLETE") && bash.contains("_FSQ_COMP_LINE"),
+        bash.contains("FIRECTL_COMPLETE") && bash.contains("_FIRECTL_COMP_LINE"),
         "{bash}"
     );
 }
@@ -530,14 +541,14 @@ fn registration_script_calls_back_into_the_binary() {
 #[test]
 fn a_stray_complete_variable_does_not_hijack_the_program() {
     for value in ["bash", "zsh", "fish"] {
-        fsq()
+        firectl()
             .env("COMPLETE", value)
             .args(["completions", "zsh"])
             .assert()
             .success()
-            .stdout("source <(FSQ_COMPLETE=zsh fsq)\n");
+            .stdout("source <(FIRECTL_COMPLETE=zsh firectl)\n");
     }
-    fsq()
+    firectl()
         .env("COMPLETE", "bash")
         .arg("--help")
         .assert()
@@ -547,7 +558,7 @@ fn a_stray_complete_variable_does_not_hijack_the_program() {
 
 #[test]
 fn completing_flags_needs_no_project() {
-    completion(&["fsq", "query", "users", "--wh"])
+    completion(&["firectl", "query", "users", "--wh"])
         .assert()
         .success()
         .stdout(contains("--where"))
@@ -573,46 +584,54 @@ fn candidates(words: &[&str]) -> Vec<String> {
 
 #[test]
 fn collections_are_not_offered_without_a_project() {
-    let offered = candidates(&["fsq", "query", ""]);
+    let offered = candidates(&["firectl", "query", ""]);
     assert!(offered.iter().all(|c| c.starts_with("--")), "{offered:?}");
 }
 
 #[test]
 fn completion_failures_are_silent() {
-    let offered = candidates(&["fsq", "--project", "p", "query", ""]);
+    let offered = candidates(&["firectl", "--project", "p", "query", ""]);
     assert!(offered.iter().all(|c| c.starts_with("--")), "{offered:?}");
     assert_eq!(
-        candidates(&["fsq", "--project", "p", "query", "users", "--where", ""]),
+        candidates(&["firectl", "--project", "p", "query", "users", "--where", ""]),
         Vec::<String>::new()
     );
     assert_eq!(
-        candidates(&["fsq", "--project", "p", "query", "users", "--select", "a,"]),
+        candidates(&[
+            "firectl",
+            "--project",
+            "p",
+            "query",
+            "users",
+            "--select",
+            "a,"
+        ]),
         Vec::<String>::new()
     );
 }
 
 #[test]
 fn completing_operators_needs_no_database() {
-    let line = "fsq query users --where 'age >";
+    let line = "firectl query users --where 'age >";
     assert_eq!(
         candidates_of(completion_line(
-            &["fsq", "query", "users", "--where", "age >"],
+            &["firectl", "query", "users", "--where", "age >"],
             Some(line)
         )),
         ["age >", "age >="]
     );
     assert_eq!(
-        candidates(&["fsq", "query", "users", "--where", "age >"]),
+        candidates(&["firectl", "query", "users", "--where", "age >"]),
         ["'age >'", "'age >='"]
     );
 }
 
 fn seeded_cache(collections: &[&str], fields: &[(&str, &[&str])]) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    // `fsq()` points every run at the emulator 127.0.0.1:1, whose answers are cached apart.
+    // `firectl()` points every run at the emulator 127.0.0.1:1, whose answers are cached apart.
     let db = dir
         .path()
-        .join("fsq/p/(default)/emulator-127%2E0%2E0%2E1%3A1");
+        .join("firectl/p/(default)/emulator-127%2E0%2E0%2E1%3A1");
     std::fs::create_dir_all(&db).unwrap();
     let written = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -641,7 +660,7 @@ fn cached_collections_are_offered_by_prefix() {
     let offered = |typed: &str| {
         candidates_of(completion_cached(
             &cache,
-            &["fsq", "--project", "p", "query", typed],
+            &["firectl", "--project", "p", "query", typed],
             None,
         ))
     };
@@ -658,7 +677,7 @@ fn cached_collections_are_offered_by_prefix() {
     assert_eq!(
         candidates_of(completion_cached(
             &cache,
-            &["fsq", "--project", "p", "indexes", "o"],
+            &["firectl", "--project", "p", "indexes", "o"],
             None
         )),
         ["orders"]
@@ -666,7 +685,7 @@ fn cached_collections_are_offered_by_prefix() {
     assert_eq!(
         candidates_of(completion_cached(
             &cache,
-            &["fsq", "--project", "p", "query", "--group", "o"],
+            &["firectl", "--project", "p", "query", "--group", "o"],
             None
         )),
         ["orders"]
@@ -677,7 +696,7 @@ fn cached_collections_are_offered_by_prefix() {
 fn cached_fields_are_offered_per_flag() {
     let fields: &[&str] = &["address", "address.city", "name", "`my-field`"];
     let cache = seeded_cache(&["users"], &[("users", fields)]);
-    let base = ["fsq", "--project", "p", "query", "users"];
+    let base = ["firectl", "--project", "p", "query", "users"];
     let offered = |flag: &str, typed: &str, line: Option<&str>| {
         let words = [&base[..], &[flag, typed]].concat();
         candidates_of(completion_cached(&cache, &words, line))
@@ -695,9 +714,9 @@ fn cached_fields_are_offered_per_flag() {
     // A name that bash would take for a command substitution is quoted for it ...
     assert_eq!(offered("--select", "my", None), ["'`my-field`'"]);
     // ... unless the cursor is already inside a quote (which then stays as it is).
-    let in_single = "fsq --project p query users --where 'my";
+    let in_single = "firectl --project p query users --where 'my";
     assert_eq!(offered("--where", "my", Some(in_single)), ["`my-field`"]);
-    let in_double = r#"fsq --project p query users --where "my"#;
+    let in_double = r#"firectl --project p query users --where "my"#;
     assert_eq!(offered("--where", "my", Some(in_double)), [r"\`my-field\`"]);
     assert_eq!(offered("--select", "na ", None), Vec::<String>::new());
     assert_eq!(offered("--order-by", "name,a", None), Vec::<String>::new());
@@ -706,12 +725,20 @@ fn cached_fields_are_offered_per_flag() {
 #[test]
 fn without_the_command_line_only_plain_candidates_are_offered() {
     // A bash registration that does not pass the cursor's quoting (an older script, or one
-    // not made by `fsq completions`): names that need quoting are left out, not guessed.
+    // not made by `firectl completions`): names that need quoting are left out, not guessed.
     let fields: &[&str] = &["name", "`my-field`", "a b"];
     let cache = seeded_cache(&["users"], &[("users", fields)]);
-    let words = ["fsq", "--project", "p", "query", "users", "--select", ""];
+    let words = [
+        "firectl",
+        "--project",
+        "p",
+        "query",
+        "users",
+        "--select",
+        "",
+    ];
     let mut cmd = completion_cached(&cache, &words, None);
-    cmd.env_remove("_FSQ_COMP_LINE");
+    cmd.env_remove("_FIRECTL_COMP_LINE");
     assert_eq!(candidates_of(cmd), ["name"]);
     assert_eq!(
         candidates_of(completion_cached(&cache, &words, None)),

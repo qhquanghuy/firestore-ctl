@@ -919,7 +919,7 @@ mod tests {
             .unwrap_err();
         let out = render_error(&AppError::WritesDisabled(denied), &target());
         assert_eq!(out, "writes are disabled for database p/d\n");
-        assert!(!out.contains("FSQ_WRITABLE"));
+        assert!(!out.contains("FIRECTL_WRITABLE"));
     }
 
     #[test]

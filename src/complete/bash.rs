@@ -16,7 +16,7 @@ use clap_complete::engine::complete;
 use clap_complete::env::{Bash, EnvCompleter};
 use itertools::Itertools;
 
-const LINE_VAR: &str = "_FSQ_COMP_LINE";
+const LINE_VAR: &str = "_FIRECTL_COMP_LINE";
 
 /// The line of `clap_complete`'s bash script after which [`LINE_VAR`] is passed. A unit
 /// test fails if a `clap_complete` upgrade changes it.
@@ -106,9 +106,9 @@ fn with_line_passed(script: &str) -> String {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct FsqBash;
+pub(super) struct FirectlBash;
 
-impl EnvCompleter for FsqBash {
+impl EnvCompleter for FirectlBash {
     fn name(&self) -> &'static str {
         Bash.name()
     }
@@ -167,15 +167,15 @@ mod tests {
     #[test]
     fn the_cursor_follows_bash_quoting() {
         let after = |line| Cursor::after(Some(line));
-        assert_eq!(after("fsq query users"), Cursor::Bare);
-        assert_eq!(after("fsq --where 'age"), Cursor::Single);
-        assert_eq!(after("fsq --where 'age == 1' --sel"), Cursor::Bare);
-        assert_eq!(after(r#"fsq --where "a"#), Cursor::Double);
-        assert_eq!(after(r#"fsq --where "a \" b"#), Cursor::Double);
-        assert_eq!(after(r"fsq a\'b"), Cursor::Bare);
-        assert_eq!(after(r#"fsq 'it"s"#), Cursor::Single);
-        assert_eq!(after(r#"fsq "it's""#), Cursor::Bare);
-        assert_eq!(after(r"fsq 'a\"), Cursor::Single);
+        assert_eq!(after("firectl query users"), Cursor::Bare);
+        assert_eq!(after("firectl --where 'age"), Cursor::Single);
+        assert_eq!(after("firectl --where 'age == 1' --sel"), Cursor::Bare);
+        assert_eq!(after(r#"firectl --where "a"#), Cursor::Double);
+        assert_eq!(after(r#"firectl --where "a \" b"#), Cursor::Double);
+        assert_eq!(after(r"firectl a\'b"), Cursor::Bare);
+        assert_eq!(after(r#"firectl 'it"s"#), Cursor::Single);
+        assert_eq!(after(r#"firectl "it's""#), Cursor::Bare);
+        assert_eq!(after(r"firectl 'a\"), Cursor::Single);
         assert_eq!(Cursor::after(None), Cursor::Unknown);
     }
 
@@ -254,7 +254,7 @@ mod tests {
         ];
         assert_eq!(bash_words(candidates, None), ["users", "name", "--where"]);
         assert_eq!(
-            bash_words(candidates, Some("fsq query users --select ")),
+            bash_words(candidates, Some("firectl query users --select ")),
             [
                 "users",
                 "'`my-field`'",
@@ -315,12 +315,18 @@ mod tests {
     #[test]
     fn registration_passes_the_line_up_to_the_cursor() {
         let mut script = Vec::new();
-        FsqBash
-            .write_registration("FSQ_COMPLETE", "fsq", "fsq", "/bin/fsq", &mut script)
+        FirectlBash
+            .write_registration(
+                "FIRECTL_COMPLETE",
+                "firectl",
+                "firectl",
+                "/bin/firectl",
+                &mut script,
+            )
             .unwrap();
         let script = String::from_utf8(script).unwrap();
-        assert!(script.contains("_FSQ_COMP_LINE=\"${COMP_LINE:0:COMP_POINT}\""));
-        assert!(script.contains("FSQ_COMPLETE=\"bash\""));
+        assert!(script.contains("_FIRECTL_COMP_LINE=\"${COMP_LINE:0:COMP_POINT}\""));
+        assert!(script.contains("FIRECTL_COMPLETE=\"bash\""));
         assert!(script.contains("_CLAP_COMPLETE_INDEX"));
     }
 
@@ -328,7 +334,7 @@ mod tests {
     fn an_unrecognised_script_is_left_as_it_is() {
         // The anchor is gone: nothing is patched, so no line will be passed, so only plain
         // words get offered (see `an_unknown_cursor_offers_plain_words_only`).
-        let other = "_other() { :; }\ncomplete -F _other fsq\n";
+        let other = "_other() { :; }\ncomplete -F _other firectl\n";
         assert_eq!(with_line_passed(other), other);
         assert!(!with_line_passed(other).contains(LINE_VAR));
     }

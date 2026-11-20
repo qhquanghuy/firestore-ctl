@@ -5,15 +5,15 @@ mod support;
 
 use std::process::ExitCode;
 
-use fsq::app::{AppError, Context, Output, Request, authorize, run};
-use fsq::domain::{
+use firectl::app::{AppError, Context, Output, Request, authorize, run};
+use firectl::domain::{
     AggregateQuery, Aggregation, CollectionPath, DbTarget, DeleteDoc, Direction, DocPath, Document,
     FieldOp, Fields, Filter, Guard, IndexAdvice, NonEmptyVec, Op, OrderBy, Query, Scope, SetDoc,
     SetMode, UpdateDoc, UpdateTime, Value, Write,
 };
-use fsq::exit::{exit_code, exit_code_value};
-use fsq::policy::{PolicyError, WriteDenied, WritePolicy};
-use fsq::port::{GatewayError, Written};
+use firectl::exit::{exit_code, exit_code_value};
+use firectl::policy::{PolicyError, WriteDenied, WritePolicy};
+use firectl::port::{GatewayError, Written};
 use support::fake::{FakeFirestore, default_target};
 
 fn path(s: &str) -> DocPath {

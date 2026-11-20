@@ -1,5 +1,5 @@
 {
-  description = "fsq: query Firestore from the command line";
+  description = "firectl: query Firestore from the command line";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -38,13 +38,13 @@
         devArtifacts = craneLib.buildDepsOnly devArgs;
         checkArgs = devArgs // { cargoArtifacts = devArtifacts; };
 
-        fsq = craneLib.buildPackage (releaseArgs // { doCheck = false; });
+        firectl = craneLib.buildPackage (releaseArgs // { doCheck = false; });
       in
       {
-        packages.default = fsq;
+        packages.default = firectl;
 
         checks = {
-          default = fsq;
+          default = firectl;
 
           clippy = craneLib.cargoClippy (
             checkArgs

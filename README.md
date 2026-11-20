@@ -1,29 +1,29 @@
-# fsq
+# firectl
 
-`fsq` queries Google Cloud Firestore from the command line: read documents, run
+`firectl` queries Google Cloud Firestore from the command line: read documents, run
 queries and counts, list collections and indexes, and (only where you allow it) write.
 It is built to be driven by scripts and coding agents as well as people, so output is
 machine-readable JSON when piped and writes are off unless you opt a database in.
 
-Run `fsq --help` for the value syntax, field quoting, typed JSON tags and exit codes;
-`fsq <command> --help` for one command.
+Run `firectl --help` for the value syntax, field quoting, typed JSON tags and exit codes;
+`firectl <command> --help` for one command.
 
 ## Install
 
 ```sh
-nix build                 # ./result/bin/fsq
+nix build                 # ./result/bin/firectl
 nix develop               # dev shell: rust toolchain, cargo-nextest, firebase-tools, jdk
 nix flake check           # fmt, clippy (-D warnings), tests
 ```
 
-To put `fsq` on your PATH, add the flake to your NixOS or home-manager config:
+To put `firectl` on your PATH, add the flake to your NixOS or home-manager config:
 
 ```nix
-# flake.nix inputs (private repo: the ssh URL uses your SSH key)
-inputs.fsq.url = "git+ssh://git@github.com/qhquanghuy/fsq";
+# flake.nix inputs
+inputs.firectl.url = "github:qhquanghuy/firestore-ctl";
 
 # home-manager (or environment.systemPackages on NixOS)
-home.packages = [ inputs.fsq.packages.${pkgs.system}.default ];
+home.packages = [ inputs.firectl.packages.${pkgs.system}.default ];
 ```
 
 ## Connecting
@@ -32,8 +32,8 @@ Every command needs a project; the database defaults to `(default)`.
 
 | Flag | Environment | Default |
 | --- | --- | --- |
-| `--project <id>` | `FSQ_PROJECT` | none (required) |
-| `--database <id>` | `FSQ_DATABASE` | `(default)` |
+| `--project <id>` | `FIRECTL_PROJECT` | none (required) |
+| `--database <id>` | `FIRECTL_DATABASE` | `(default)` |
 
 Flags win over environment variables.
 
@@ -42,7 +42,7 @@ Authentication:
 1. Application Default Credentials, if present (`GOOGLE_APPLICATION_CREDENTIALS`, the
    login from `gcloud auth application-default login`, or a Google-hosted environment).
    If ADC is present but fails (expired login, unreachable token endpoint), that failure
-   is reported; `fsq` never falls back to another identity.
+   is reported; `firectl` never falls back to another identity.
 2. Only when there is no ADC source at all, a token from `gcloud auth print-access-token`.
 
 If `FIRESTORE_EMULATOR_HOST` is set, it takes precedence: requests go to that emulator with
@@ -53,14 +53,14 @@ Not logged in or expired credentials exit with code 8 and say how to log in.
 
 ## Write safety
 
-`set`, `update` and `delete` only work on databases you list in `FSQ_WRITABLE`. Unset or
+`set`, `update` and `delete` only work on databases you list in `FIRECTL_WRITABLE`. Unset or
 empty means read-only; a write then fails with exit code 6.
 This is a guardrail against unintended writes by scripts and agents, not a security
 boundary: whoever controls the environment can set the variable. Set it yourself, per
 session or per database, rather than in a shared profile. It is not mentioned in `--help`.
 
 ```sh
-export FSQ_WRITABLE='my-project/(default),my-project/staging-db'
+export FIRECTL_WRITABLE='my-project/(default),my-project/staging-db'
 ```
 
 Prefer exact `project/database` entries. A bare database name matches that database in EVERY
@@ -77,27 +77,27 @@ project you can reach, which is rarely what you mean.
 
 ```sh
 # Read
-fsq get users/u1
-fsq query users --where 'age >= 18' --where 'city == "New York"' --order-by age:desc --limit 20
-fsq query users --select name,address.city --offset 40
-fsq query users --all                        # no limit (default: 100 documents)
-fsq query --group orders --where 'total > 100'     # every collection named "orders", any depth
-fsq query --group orders shops/s1            # only below one document
-fsq count users --where 'active == true' --sum balance --avg age
-fsq collections                              # root collections
-fsq collections users/u1                     # subcollections of a document
-fsq indexes orders                           # composite indexes of a collection id
+firectl get users/u1
+firectl query users --where 'age >= 18' --where 'city == "New York"' --order-by age:desc --limit 20
+firectl query users --select name,address.city --offset 40
+firectl query users --all                        # no limit (default: 100 documents)
+firectl query --group orders --where 'total > 100'     # every collection named "orders", any depth
+firectl query --group orders shops/s1            # only below one document
+firectl count users --where 'active == true' --sum balance --avg age
+firectl collections                              # root collections
+firectl collections users/u1                     # subcollections of a document
+firectl indexes orders                           # composite indexes of a collection id
 
-# Write (need FSQ_WRITABLE)
-fsq set users/u1 --data '{"name": "Ann", "age": 30}'     # create; exit 4 if it exists
-fsq set users/u1 --data @user.json --overwrite           # replace
-fsq set users/u1 --data '{"age": 31}' --merge            # merge fields, create if missing
-echo '{"name": "Ann"}' | fsq set users/u1 --data - --overwrite
-fsq update users/u1 --set age=31 --set 'tags+=[vip, new]' --set 'old-=1' --set address.city=\"Oslo\"
-fsq delete users/u1                          # exit 3 if it does not exist
+# Write (need FIRECTL_WRITABLE)
+firectl set users/u1 --data '{"name": "Ann", "age": 30}'     # create; exit 4 if it exists
+firectl set users/u1 --data @user.json --overwrite           # replace
+firectl set users/u1 --data '{"age": 31}' --merge            # merge fields, create if missing
+echo '{"name": "Ann"}' | firectl set users/u1 --data - --overwrite
+firectl update users/u1 --set age=31 --set 'tags+=[vip, new]' --set 'old-=1' --set address.city=\"Oslo\"
+firectl delete users/u1                          # exit 3 if it does not exist
 
 # Shell completion
-fsq completions zsh                          # prints the line to add to your rc file
+firectl completions zsh                          # prints the line to add to your rc file
 ```
 
 `--where` takes a whole filter as one shell argument and repeats for AND. Operators:
@@ -164,7 +164,7 @@ those names, use the full-document form and put it inside `data`.
 
 ### Indexes
 
-`fsq indexes` lists composite indexes through the Firestore Admin API, so it needs credentials
+`firectl indexes` lists composite indexes through the Firestore Admin API, so it needs credentials
 with the `datastore.indexes.list` permission, and it is not supported by the emulator.
 
 When a query fails for want of an index (exit 7), the error shows the `gcloud` command for a
@@ -194,8 +194,8 @@ the document changed meanwhile. Pass `--force` to overwrite anyway, or an explic
 guarded.
 
 ```sh
-t=$(fsq get users/u1 | jq -r ._updateTime)
-fsq update users/u1 --set status=\"done\" --if-unchanged-since "$t"
+t=$(firectl get users/u1 | jq -r ._updateTime)
+firectl update users/u1 --set status=\"done\" --if-unchanged-since "$t"
 ```
 
 ### Limits
@@ -221,13 +221,13 @@ has a 60 second deadline.
 ## Completion
 
 ```sh
-source <(FSQ_COMPLETE=zsh fsq)     # or FSQ_COMPLETE=bash; add to ~/.zshrc / ~/.bashrc
+source <(FIRECTL_COMPLETE=zsh firectl)     # or FIRECTL_COMPLETE=bash; add to ~/.zshrc / ~/.bashrc
 ```
 
 TAB completes subcommands and flags, and, using the database you are addressing
-(`--project`/`FSQ_PROJECT`, `--database`/`FSQ_DATABASE`), collection ids and field names.
+(`--project`/`FIRECTL_PROJECT`, `--database`/`FIRECTL_DATABASE`), collection ids and field names.
 Lookups are best effort (no candidates on any failure, 2 second limit) and cached under
-`~/.cache/fsq` (`$XDG_CACHE_HOME/fsq`): 10 minutes for answers, 60 seconds for failures, so
+`~/.cache/firectl` (`$XDG_CACHE_HOME/firectl`): 10 minutes for answers, 60 seconds for failures, so
 an offline shell is not slowed on every keypress. Field names come from sampled documents.
 
 bash limitation: bash splits words at `:` and `=`, so a value typed after one (unquoted
@@ -248,6 +248,6 @@ The emulator cannot test named databases (it has only `(default)`), index requir
 (it does not enforce composite indexes, so exit 7 is not exercised) or `indexes`.
 
 ```sh
-nix develop -c firebase emulators:exec --only firestore --project demo-fsq \
+nix develop -c firebase emulators:exec --only firestore --project demo-firectl \
   'cargo nextest run --test emulator --run-ignored all'
 ```

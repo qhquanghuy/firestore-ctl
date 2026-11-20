@@ -1,4 +1,4 @@
-//! The `fsq` binary: parse → write policy → authorize → connect → run → print.
+//! The `firectl` binary: parse → write policy → authorize → connect → run → print.
 #![allow(clippy::print_stderr)]
 
 use std::io::{self, IsTerminal, Write as _};
@@ -7,14 +7,14 @@ use std::process::ExitCode;
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
-use fsq::app::{self, AppError, Context};
-use fsq::cli::{Cli, Cmd, truncation_note};
-use fsq::complete::{COMPLETE_VAR, registration_line, shells};
-use fsq::domain::DbTarget;
-use fsq::exit::exit_code;
-use fsq::grpc;
-use fsq::policy::{PolicyError, WritePolicy};
-use fsq::render::{render, render_error};
+use firectl::app::{self, AppError, Context};
+use firectl::cli::{Cli, Cmd, truncation_note};
+use firectl::complete::{COMPLETE_VAR, registration_line, shells};
+use firectl::domain::DbTarget;
+use firectl::exit::exit_code;
+use firectl::grpc;
+use firectl::policy::{PolicyError, WritePolicy};
+use firectl::render::{render, render_error};
 
 /// A closed pipe (`| head`) means the reader went away, which is not an error worth reporting.
 fn emit(text: &str) -> ExitCode {
@@ -33,7 +33,7 @@ fn fail(e: &AppError, target: &DbTarget) -> ExitCode {
     exit_code(e)
 }
 
-/// A malformed `FSQ_WRITABLE` only matters to writes:
+/// A malformed `FIRECTL_WRITABLE` only matters to writes:
 /// they fail with it, while reads (which need no policy) go ahead read-only.
 fn effective_policy(
     parsed: Result<WritePolicy, PolicyError>,
@@ -69,7 +69,7 @@ async fn run() -> ExitCode {
         Ok(None) => Cli::command()
             .error(
                 ErrorKind::MissingRequiredArgument,
-                "the following required argument was not provided: --project <PROJECT> (or set FSQ_PROJECT)",
+                "the following required argument was not provided: --project <PROJECT> (or set FIRECTL_PROJECT)",
             )
             .exit(),
         Err(message) => Cli::command().error(ErrorKind::InvalidValue, message).exit(),
@@ -78,7 +78,7 @@ async fn run() -> ExitCode {
 
     let is_write = cli.cmd.is_write();
     let default_limit = cli.cmd.uses_default_limit();
-    let parsed = WritePolicy::from_env_value(std::env::var("FSQ_WRITABLE").ok().as_deref());
+    let parsed = WritePolicy::from_env_value(std::env::var("FIRECTL_WRITABLE").ok().as_deref());
     let ctx = match effective_policy(parsed, is_write) {
         Ok(policy) => Context {
             target: target.clone(),

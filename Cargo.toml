@@ -1,16 +1,16 @@
 [package]
-name = "fsq"
+name = "firectl"
 version = "0.1.0"
 edition = "2024"
 description = "Query Firestore from the command line"
 publish = false
 
 [lib]
-name = "fsq"
+name = "firectl"
 path = "src/lib.rs"
 
 [[bin]]
-name = "fsq"
+name = "firectl"
 path = "src/main.rs"
 
 [dependencies]
