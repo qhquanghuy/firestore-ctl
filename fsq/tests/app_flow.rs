@@ -424,7 +424,7 @@ fn exit_codes() {
     assert_eq!(gw(GatewayError::Auth("x".into())), 8);
     assert_eq!(gw(GatewayError::PermissionDenied("x".into())), 8);
     assert_eq!(gw(GatewayError::NotFound(p())), 3);
-    assert_eq!(gw(GatewayError::ResourceNotFound("db".into())), 3);
+    assert_eq!(gw(GatewayError::ResourceNotFound("db".into())), 1);
     assert_eq!(exit_code_value(&AppError::NotFound(p())), 3);
     assert_eq!(gw(GatewayError::AlreadyExists(p())), 4);
     assert_eq!(gw(GatewayError::PreconditionFailed(p())), 5);

@@ -18,7 +18,6 @@ use gcloud_sdk::{
     GoogleApi, GoogleAuthHeaders, GoogleAuthMiddleware, GoogleAuthMiddlewareLayer, HeaderMap,
     RequestTimeouts,
 };
-use itertools::Itertools;
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -288,15 +287,11 @@ fn on_gce() -> bool {
         .is_ok_and(|name| name.trim().starts_with("Google"))
 }
 
-/// The error for credential sources that all failed: [`GatewayError::Auth`], unless one
-/// failed for network reasons, in which case the login may be fine and it is
-/// [`GatewayError::Other`].
-fn credentials_error(attempts: &[(&str, CredentialFailure)]) -> GatewayError {
-    let detail = attempts
-        .iter()
-        .map(|(source, failure)| format!("{source}: {}", failure.reason))
-        .join("; ");
-    if attempts.iter().any(|(_, failure)| failure.network) {
+/// The error for a failed credential `source`: [`GatewayError::Auth`], unless it failed for
+/// network reasons, in which case the login may be fine and it is [`GatewayError::Other`].
+fn credentials_error(source: CredentialSource, failure: &CredentialFailure) -> GatewayError {
+    let detail = format!("{}: {}", source.name(), failure.reason);
+    if failure.network {
         other(format!(
             "could not reach Google to get credentials ({detail})"
         ))
@@ -305,26 +300,46 @@ fn credentials_error(attempts: &[(&str, CredentialFailure)]) -> GatewayError {
     }
 }
 
-/// Google credentials: Application Default Credentials where they can exist, else (or
-/// if they fail) a `gcloud` access token.
+/// Where Google credentials come from. Exactly one source is tried: a failing
+/// Application Default Credentials login is reported, never papered over with whatever
+/// identity `gcloud` happens to hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialSource {
+    /// Application Default Credentials.
+    Adc,
+    /// `gcloud auth print-access-token`.
+    Gcloud,
+}
+
+impl CredentialSource {
+    /// ADC when it can exist on this machine (see [`adc_available`]); `gcloud` only when
+    /// there is no ADC source at all.
+    fn choose(adc_possible: bool) -> Self {
+        if adc_possible {
+            Self::Adc
+        } else {
+            Self::Gcloud
+        }
+    }
+
+    /// How this source is named in an error.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Adc => "Application Default Credentials",
+            Self::Gcloud => "gcloud",
+        }
+    }
+}
+
+/// Google credentials from the one source [`CredentialSource::choose`] picks.
 async fn google_headers() -> Result<GoogleAuthHeaders, GatewayError> {
     let adc_possible = adc_available(|name| std::env::var(name).ok(), Path::is_file, on_gce());
-    let adc = if adc_possible {
-        match within(adc_headers()).await {
-            Ok(headers) => return Ok(headers),
-            Err(failure) => Some(failure),
-        }
-    } else {
-        None
-    };
-    within(gcloud_headers()).await.map_err(|gcloud| {
-        let attempts = adc
-            .map(|f| ("Application Default Credentials", f))
-            .into_iter()
-            .chain([("gcloud", gcloud)])
-            .collect::<Vec<_>>();
-        credentials_error(&attempts)
-    })
+    let source = CredentialSource::choose(adc_possible);
+    match source {
+        CredentialSource::Adc => within(adc_headers()).await,
+        CredentialSource::Gcloud => within(gcloud_headers()).await,
+    }
+    .map_err(|failure| credentials_error(source, &failure))
 }
 
 /// Opens the data client for `t` on `endpoint`. Every request it makes carries
@@ -333,8 +348,8 @@ async fn google_headers() -> Result<GoogleAuthHeaders, GatewayError> {
 ///
 /// # Errors
 /// [`GatewayError::Auth`] if no credentials work; [`GatewayError::Other`] if Firestore
-/// (or Google's token endpoint) cannot be reached. Takes at most 25 seconds: ADC and
-/// `gcloud` get ten each, the channel five.
+/// (or Google's token endpoint) cannot be reached. Takes at most 15 seconds: the credential
+/// source gets ten, the channel five.
 pub async fn open(
     t: &DbTarget,
     endpoint: &Endpoint,
@@ -506,19 +521,53 @@ mod tests {
     }
 
     #[test]
-    fn credential_failures_are_auth_unless_one_was_a_network_problem() {
+    fn credential_failures_are_auth_unless_it_was_a_network_problem() {
         let rejected = CredentialFailure::rejected("no account");
         let network = CredentialFailure {
             reason: "timed out after 10s".to_owned(),
             network: true,
         };
         assert!(matches!(
-            credentials_error(&[("gcloud", rejected.clone())]),
-            GatewayError::Auth(m) if m.contains("no account")
+            credentials_error(CredentialSource::Gcloud, &rejected),
+            GatewayError::Auth(m) if m.contains("no account") && m.contains("gcloud")
         ));
         assert!(matches!(
-            credentials_error(&[("Application Default Credentials", network), ("gcloud", rejected)]),
-            GatewayError::Other(m) if m.contains("timed out") && m.contains("no account")
+            credentials_error(CredentialSource::Adc, &network),
+            GatewayError::Other(m) if m.contains("timed out")
+        ));
+    }
+
+    #[test]
+    fn gcloud_is_used_only_when_no_adc_source_exists() {
+        assert_eq!(CredentialSource::choose(true), CredentialSource::Adc);
+        assert_eq!(CredentialSource::choose(false), CredentialSource::Gcloud);
+        // the decision follows what is on the machine
+        let none = |_: &Path| false;
+        let key = env(&[("GOOGLE_APPLICATION_CREDENTIALS", "/k.json")]);
+        assert_eq!(
+            CredentialSource::choose(adc_available(key, none, false)),
+            CredentialSource::Adc
+        );
+        assert_eq!(
+            CredentialSource::choose(adc_available(env(&[]), none, false)),
+            CredentialSource::Gcloud
+        );
+    }
+
+    #[test]
+    fn a_failing_adc_login_is_reported_without_mentioning_gcloud() {
+        let expired = CredentialFailure::rejected("token expired");
+        let error = credentials_error(CredentialSource::Adc, &expired);
+        assert!(matches!(&error, GatewayError::Auth(m)
+            if m.contains("Application Default Credentials") && m.contains("token expired")
+                && !m.contains("gcloud")));
+        let flaky = CredentialFailure {
+            reason: "timed out after 10s".to_owned(),
+            network: true,
+        };
+        assert!(matches!(
+            credentials_error(CredentialSource::Adc, &flaky),
+            GatewayError::Other(m) if !m.contains("gcloud")
         ));
     }
 }
