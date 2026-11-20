@@ -33,13 +33,19 @@ pub enum PolicyError {
     /// An entry used a wildcard.
     #[error("FSQ_WRITABLE entry `{0}`: wildcards are not allowed; list databases explicitly")]
     Wildcard(String),
+    /// A bare `(default)` would match every project's default database.
+    #[error(
+        "FSQ_WRITABLE entry `(default)`: name the project, e.g. `my-project/(default)`; \
+         a bare `(default)` would allow writes to every project's default database"
+    )]
+    BareDefault,
     /// An entry was not `database` or `project/database`.
-    #[error("FSQ_WRITABLE entry `{entry}`: {source}")]
+    #[error("FSQ_WRITABLE entry `{entry}`: {reason}")]
     Invalid {
         /// The offending entry.
         entry: String,
         /// Which identifier was invalid and why.
-        source: IdError,
+        reason: IdError,
     },
 }
 
@@ -47,12 +53,15 @@ impl FromStr for WritableEntry {
     type Err = PolicyError;
 
     fn from_str(entry: &str) -> Result<Self, PolicyError> {
-        let invalid = |source| PolicyError::Invalid {
+        let invalid = |reason| PolicyError::Invalid {
             entry: entry.to_owned(),
-            source,
+            reason,
         };
         if entry.contains('*') {
             return Err(PolicyError::Wildcard(entry.to_owned()));
+        }
+        if entry == "(default)" {
+            return Err(PolicyError::BareDefault);
         }
         match entry.split_once('/') {
             Some((project, database)) => Ok(Self::Exact(DbTarget {
@@ -168,6 +177,15 @@ mod tests {
         for v in ["*", "dev/*", "a,*"] {
             assert!(WritePolicy::from_env_value(Some(v)).is_err(), "{v}");
         }
+    }
+
+    #[test]
+    fn policy_rejects_bare_default_database() {
+        assert_eq!(
+            WritePolicy::from_env_value(Some("a, (default)")),
+            Err(PolicyError::BareDefault)
+        );
+        assert!(WritePolicy::from_env_value(Some("p/(default)")).is_ok());
     }
 
     #[test]

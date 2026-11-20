@@ -32,7 +32,8 @@ pub enum SetMode {
     Create,
     /// Replace the document entirely.
     Overwrite(Guard),
-    /// Merge the given fields into the document, creating it if missing.
+    /// Merge the given fields into the document, creating it if missing. With
+    /// [`Guard::UnchangedSince`] a missing document fails the precondition instead.
     Merge(Guard),
 }
 

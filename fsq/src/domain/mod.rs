@@ -13,7 +13,7 @@ pub mod write;
 pub use document::Document;
 pub use field::{FieldPath, FieldPathError};
 pub use ids::{CollectionId, DatabaseId, DbTarget, DocId, IdError, ProjectId};
-pub use index::{IndexField, IndexMode, IndexSpec, QueryScope, required_index};
+pub use index::{IndexAdvice, IndexField, IndexMode, IndexSpec, QueryScope, required_index};
 pub use nonempty::{EmptyError, NonEmptyVec};
 pub use path::{AnyPath, CollectionPath, DocPath, PathError};
 pub use query::{

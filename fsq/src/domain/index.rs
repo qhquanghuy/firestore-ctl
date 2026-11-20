@@ -1,9 +1,10 @@
-//! Composite-index advice: which index a query needs and how to create it.
+//! Index advice: which index a query needs and how to create it.
 
 use itertools::Itertools;
 
 use super::field::FieldPath;
 use super::ids::{CollectionId, DbTarget};
+use super::nonempty::NonEmptyVec;
 use super::query::{Direction, Filter, Op, Query, Scope};
 
 /// How one field participates in a composite index.
@@ -17,7 +18,7 @@ pub enum IndexMode {
     ArrayContains,
 }
 
-/// One field of a composite index.
+/// One field of an index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexField {
     /// The indexed field.
@@ -35,7 +36,8 @@ pub enum QueryScope {
     CollectionGroup,
 }
 
-/// A composite index definition.
+/// A composite index definition. [`required_index`] only produces specs with at least
+/// two fields, the minimum Firestore accepts for a composite index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexSpec {
     /// The collection (or group) name the index is on.
@@ -43,35 +45,79 @@ pub struct IndexSpec {
     /// Single collection or collection group.
     pub scope: QueryScope,
     /// Indexed fields, in index order.
-    pub fields: Vec<IndexField>,
+    pub fields: NonEmptyVec<IndexField>,
 }
 
-/// The composite index `q` needs, or `None` when Firestore's automatic
-/// single-field indexes suffice.
+/// The index a query is missing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexAdvice {
+    /// A composite index over two or more fields.
+    Composite(IndexSpec),
+    /// A collection-group-scoped single-field index (not created by default, and
+    /// Firestore rejects one-field composite indexes).
+    SingleField {
+        /// The collection group name.
+        collection_group: CollectionId,
+        /// The field and how it must be indexed.
+        field: IndexField,
+    },
+}
+
+/// What index `q` needs beyond Firestore's automatic indexes, if any.
 ///
-/// Fields, in order: equality filters (`==`, `in`: ascending; `array-contains[-any]`:
-/// array-contains) in filter order, then each `order` term with its direction, then
-/// inequality-filter fields (`!=`, `not-in`, `<`, `<=`, `>`, `>=`) not already present
-/// (ascending). A field appears once, at its first position.
+/// Candidate fields, in order, each at its first position only:
+/// 1. equality filters (`==`, `in`: ascending; `array-contains[-any]`: array-contains)
+///    in filter order;
+/// 2. each `order` term with its direction;
+/// 3. fields of inequality filters (`!=`, `not-in`, `<`, `<=`, `>`, `>=`) not yet
+///    present, sorted by field path, in the direction of the last `order` term
+///    (ascending if there is none), as Firestore orders them implicitly.
 ///
-/// For a collection scope the result is `None` when that list has at most one field, or
-/// when there are only equality filters and no ordering (Firestore merges single-field
-/// indexes for those). For a collection-group scope single-field indexes are not created
-/// by default, so any filter or ordering yields `Some`.
+/// The document name (`__name__`) is never a candidate. For a collection scope the
+/// result is [`IndexAdvice::Composite`] when there are at least two candidates and at
+/// least one ordering or inequality; equality-only queries are served by merging
+/// single-field indexes. A collection-group scope has no automatic indexes: two or more
+/// candidates give a composite, exactly one gives [`IndexAdvice::SingleField`].
 #[must_use]
-pub fn required_index(q: &Query) -> Option<IndexSpec> {
+pub fn required_index(q: &Query) -> Option<IndexAdvice> {
     let is_equality = |f: &&Filter| {
         matches!(
             f.op(),
             Op::Eq | Op::In | Op::ArrayContains | Op::ArrayContainsAny
         )
     };
+    let indexable = |field: &FieldPath| field.segments() != ["__name__"];
     let (equalities, inequalities): (Vec<&Filter>, Vec<&Filter>) =
         q.filters.iter().partition(is_equality);
-    let beyond_equality = !q.order.is_empty() || !inequalities.is_empty();
+    let orders: Vec<IndexField> = q
+        .order
+        .iter()
+        .filter(|o| indexable(&o.field))
+        .map(|o| IndexField {
+            field: o.field.clone(),
+            mode: direction_mode(o.direction),
+        })
+        .collect();
+    let implicit_mode = q
+        .order
+        .last()
+        .map_or(IndexMode::Asc, |o| direction_mode(o.direction));
+    let implicit: Vec<IndexField> = inequalities
+        .iter()
+        .map(|f| f.field())
+        .filter(|field| indexable(field))
+        .sorted()
+        .dedup()
+        .map(|field| IndexField {
+            field: field.clone(),
+            mode: implicit_mode,
+        })
+        .collect();
+    let beyond_equality = !orders.is_empty() || !implicit.is_empty();
 
     let fields: Vec<IndexField> = equalities
         .into_iter()
+        .filter(|f| indexable(f.field()))
         .map(|f| IndexField {
             field: f.field().clone(),
             mode: match f.op() {
@@ -79,37 +125,69 @@ pub fn required_index(q: &Query) -> Option<IndexSpec> {
                 _ => IndexMode::Asc,
             },
         })
-        .chain(q.order.iter().map(|o| IndexField {
-            field: o.field.clone(),
-            mode: match o.direction {
-                Direction::Asc => IndexMode::Asc,
-                Direction::Desc => IndexMode::Desc,
-            },
-        }))
-        .chain(inequalities.into_iter().map(|f| IndexField {
-            field: f.field().clone(),
-            mode: IndexMode::Asc,
-        }))
+        .chain(orders)
+        .chain(implicit)
         .unique_by(|f| f.field.clone())
         .collect();
 
-    let (scope, collection_group, needed) = match &q.scope {
-        Scope::Collection(c) => (
-            QueryScope::Collection,
-            c.id().clone(),
-            fields.len() > 1 && beyond_equality,
-        ),
-        Scope::Group { id, .. } => (QueryScope::CollectionGroup, id.clone(), !fields.is_empty()),
+    let (scope, collection_group) = match &q.scope {
+        Scope::Collection(c) => (QueryScope::Collection, c.id().clone()),
+        Scope::Group { id, .. } => (QueryScope::CollectionGroup, id.clone()),
     };
-    needed.then_some(IndexSpec {
-        collection_group,
-        scope,
-        fields,
-    })
+    match (scope, fields.as_slice()) {
+        (_, []) => None,
+        (QueryScope::CollectionGroup, [only]) => Some(IndexAdvice::SingleField {
+            collection_group,
+            field: only.clone(),
+        }),
+        (QueryScope::Collection, _) if fields.len() < 2 || !beyond_equality => None,
+        _ => NonEmptyVec::try_from(fields).ok().map(|fields| {
+            IndexAdvice::Composite(IndexSpec {
+                collection_group,
+                scope,
+                fields,
+            })
+        }),
+    }
+}
+
+fn direction_mode(direction: Direction) -> IndexMode {
+    match direction {
+        Direction::Asc => IndexMode::Asc,
+        Direction::Desc => IndexMode::Desc,
+    }
+}
+
+impl IndexAdvice {
+    /// A shell command creating the advised index in `t`'s database.
+    #[must_use]
+    pub fn gcloud_command(&self, t: &DbTarget) -> String {
+        match self {
+            Self::Composite(spec) => spec.gcloud_command(t),
+            Self::SingleField {
+                collection_group,
+                field,
+            } => {
+                let config = match field.mode {
+                    IndexMode::Asc => "order=ascending",
+                    IndexMode::Desc => "order=descending",
+                    IndexMode::ArrayContains => "array-config=contains",
+                };
+                shell_join(&[
+                    "gcloud firestore indexes fields update".to_owned(),
+                    field.field.to_firestore(),
+                    format!("--project={}", t.project),
+                    format!("--database={}", t.database),
+                    format!("--collection-group={collection_group}"),
+                    format!("--index={config},query-scope=collection-group"),
+                ])
+            }
+        }
+    }
 }
 
 impl IndexSpec {
-    /// A shell command creating this index in `t`'s database.
+    /// A shell command creating this composite index in `t`'s database.
     #[must_use]
     pub fn gcloud_command(&self, t: &DbTarget) -> String {
         let scope = match self.scope {
@@ -127,7 +205,8 @@ impl IndexSpec {
                 f.field.to_firestore()
             )
         });
-        let args = [
+        let words: Vec<String> = [
+            "gcloud firestore indexes composite create".to_owned(),
             format!("--project={}", t.project),
             format!("--database={}", t.database),
             format!("--collection-group={}", self.collection_group),
@@ -135,13 +214,18 @@ impl IndexSpec {
         ]
         .into_iter()
         .chain(fields)
-        .map(|arg| shell_quote(&arg))
-        .collect::<Vec<_>>();
-        format!(
-            "gcloud firestore indexes composite create {}",
-            args.join(" ")
-        )
+        .collect();
+        shell_join(&words)
     }
+}
+
+/// Joins a fixed command prefix (the first word) and quoted arguments with spaces.
+fn shell_join(words: &[String]) -> String {
+    words
+        .iter()
+        .enumerate()
+        .map(|(i, w)| if i == 0 { w.clone() } else { shell_quote(w) })
+        .join(" ")
 }
 
 /// `arg` single-quoted for a POSIX shell unless it is already plain.
@@ -155,7 +239,7 @@ fn shell_quote(arg: &str) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::domain::{DbTarget, Filter, OrderBy, Query, Scope};
@@ -194,6 +278,14 @@ mod tests {
         }
     }
 
+    /// The composite index `q` needs; fails the test for any other advice.
+    fn composite(q: &Query) -> IndexSpec {
+        match required_index(q) {
+            Some(IndexAdvice::Composite(spec)) => spec,
+            other => panic!("expected a composite index, got {other:?}"),
+        }
+    }
+
     fn fields(spec: &IndexSpec) -> Vec<(String, IndexMode)> {
         spec.fields
             .iter()
@@ -201,10 +293,18 @@ mod tests {
             .collect()
     }
 
+    fn asc(name: &str) -> (String, IndexMode) {
+        (name.to_owned(), IndexMode::Asc)
+    }
+
+    fn desc(name: &str) -> (String, IndexMode) {
+        (name.to_owned(), IndexMode::Desc)
+    }
+
     #[test]
     fn index_needed_for_eq_plus_order_on_other_field() {
         let q = query("users", &["status == active"], &["createdAt:desc"]);
-        let spec = required_index(&q).unwrap();
+        let spec = composite(&q);
         assert_eq!(
             spec.fields
                 .iter()
@@ -226,8 +326,7 @@ mod tests {
 
     #[test]
     fn gcloud_command_names_database() {
-        let cmd = required_index(&query("users", &["status == active", "age > 18"], &[]))
-            .unwrap()
+        let cmd = composite(&query("users", &["status == active", "age > 18"], &[]))
             .gcloud_command(&target("p", "app-db"));
         assert!(
             cmd.contains("--database=app-db")
@@ -243,56 +342,82 @@ mod tests {
             &["createdAt:desc"],
         );
         assert_eq!(
-            fields(&required_index(&q).unwrap()),
+            fields(&composite(&q)),
             [
                 ("tags".to_owned(), IndexMode::ArrayContains),
-                ("status".to_owned(), IndexMode::Asc),
-                ("createdAt".to_owned(), IndexMode::Desc),
-                ("age".to_owned(), IndexMode::Asc),
+                asc("status"),
+                desc("createdAt"),
+                desc("age"),
             ]
+        );
+    }
+
+    #[test]
+    fn implicit_inequality_fields_are_sorted_by_path_in_last_order_direction() {
+        let q = query("users", &["z > 1", "a < 5", "e == 1"], &[]);
+        assert_eq!(fields(&composite(&q)), [asc("e"), asc("a"), asc("z")]);
+        let q = query("users", &["z > 1", "a < 5"], &["c:desc", "d:asc"]);
+        assert_eq!(
+            fields(&composite(&q)),
+            [desc("c"), asc("d"), asc("a"), asc("z")]
+        );
+        let q = query("users", &["z > 1", "a < 5"], &["c:asc", "d:desc"]);
+        assert_eq!(
+            fields(&composite(&q)),
+            [asc("c"), desc("d"), desc("a"), desc("z")]
         );
     }
 
     #[test]
     fn ne_and_not_in_count_as_inequalities_and_array_contains_any_as_array() {
         let ne = query("users", &["a == 1", "b != 2"], &[]);
-        assert_eq!(
-            fields(&required_index(&ne).unwrap()),
-            [
-                ("a".to_owned(), IndexMode::Asc),
-                ("b".to_owned(), IndexMode::Asc)
-            ]
-        );
+        assert_eq!(fields(&composite(&ne)), [asc("a"), asc("b")]);
         let not_in = query("users", &["a == 1", "b not-in [1, 2]"], &[]);
-        assert!(required_index(&not_in).is_some());
+        assert_eq!(fields(&composite(&not_in)), [asc("a"), asc("b")]);
         let any = query("users", &["t array-contains-any [x, y]"], &["c"]);
         assert_eq!(
-            fields(&required_index(&any).unwrap()),
-            [
-                ("t".to_owned(), IndexMode::ArrayContains),
-                ("c".to_owned(), IndexMode::Asc)
-            ]
+            fields(&composite(&any)),
+            [("t".to_owned(), IndexMode::ArrayContains), asc("c")]
         );
     }
 
     #[test]
     fn ordered_inequality_field_is_not_repeated() {
         let q = query("users", &["status == a", "age > 18"], &["age:desc"]);
-        assert_eq!(
-            fields(&required_index(&q).unwrap()),
-            [
-                ("status".to_owned(), IndexMode::Asc),
-                ("age".to_owned(), IndexMode::Desc)
-            ]
-        );
+        assert_eq!(fields(&composite(&q)), [asc("status"), desc("age")]);
     }
 
     #[test]
-    fn collection_group_always_needs_index_when_constrained() {
-        assert!(required_index(&group("users", &["status == a"], &[])).is_some());
-        assert!(required_index(&group("users", &[], &["age"])).is_some());
+    fn document_name_is_not_an_index_field() {
+        assert!(required_index(&query("users", &["a == 1"], &["__name__"])).is_none());
+        assert!(required_index(&query("users", &["__name__ > x"], &["a"])).is_none());
+        let q = query("users", &["a == 1"], &["b", "__name__:desc"]);
+        assert_eq!(fields(&composite(&q)), [asc("a"), asc("b")]);
+    }
+
+    #[test]
+    fn collection_group_single_field_gets_field_override_advice() {
+        let q = group("users", &["status == a"], &[]);
+        assert_eq!(
+            required_index(&q),
+            Some(IndexAdvice::SingleField {
+                collection_group: "users".parse().unwrap(),
+                field: IndexField {
+                    field: "status".parse().unwrap(),
+                    mode: IndexMode::Asc,
+                },
+            })
+        );
+        assert!(matches!(
+            required_index(&group("users", &[], &["age:desc"])),
+            Some(IndexAdvice::SingleField { .. })
+        ));
         assert!(required_index(&group("users", &[], &[])).is_none());
-        let spec = required_index(&group("users", &["status == a"], &[])).unwrap();
+    }
+
+    #[test]
+    fn collection_group_multi_field_is_a_group_scoped_composite() {
+        let spec = composite(&group("users", &["status == a", "plan == b"], &[]));
         assert_eq!(spec.scope, QueryScope::CollectionGroup);
         assert!(
             spec.gcloud_command(&target("p", "d"))
@@ -301,16 +426,15 @@ mod tests {
     }
 
     #[test]
-    fn gcloud_command_has_exact_shape() {
-        let cmd = required_index(&query(
+    fn composite_command_has_exact_shape() {
+        let advice = required_index(&query(
             "users",
             &["tags array-contains x"],
             &["createdAt:desc"],
         ))
-        .unwrap()
-        .gcloud_command(&target("p", "(default)"));
+        .unwrap();
         assert_eq!(
-            cmd,
+            advice.gcloud_command(&target("p", "(default)")),
             "gcloud firestore indexes composite create --project=p '--database=(default)' \
              --collection-group=users --query-scope=COLLECTION \
              --field-config=field-path=tags,array-config=contains \
@@ -319,13 +443,35 @@ mod tests {
     }
 
     #[test]
+    fn single_field_commands_have_exact_shape() {
+        let t = target("p", "d");
+        let ordered = required_index(&group("users", &[], &["age:desc"])).unwrap();
+        assert_eq!(
+            ordered.gcloud_command(&t),
+            "gcloud firestore indexes fields update age --project=p --database=d \
+             --collection-group=users --index=order=descending,query-scope=collection-group"
+        );
+        let array = required_index(&group("users", &["tags array-contains x"], &[])).unwrap();
+        assert_eq!(
+            array.gcloud_command(&t),
+            "gcloud firestore indexes fields update tags --project=p --database=d \
+             --collection-group=users --index=array-config=contains,query-scope=collection-group"
+        );
+    }
+
+    #[test]
     fn gcloud_command_shell_quotes_odd_field_paths() {
-        let cmd = required_index(&query("users", &["`my field` == 1"], &["b"]))
-            .unwrap()
+        let cmd = composite(&query("users", &["`my field` == 1"], &["b"]))
             .gcloud_command(&target("p", "d"));
         assert!(
             cmd.contains("'--field-config=field-path=`my field`,order=ascending'"),
             "{cmd}"
+        );
+        let single = required_index(&group("users", &[], &["`my field`"])).unwrap();
+        assert!(
+            single
+                .gcloud_command(&target("p", "d"))
+                .contains("update '`my field`' --project=p"),
         );
     }
 }
