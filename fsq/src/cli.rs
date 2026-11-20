@@ -16,7 +16,7 @@ use serde_json::Value as Json;
 
 use crate::app::{AppError, Request};
 use crate::codec::typed_json;
-use crate::complete::{collection_completer, field_completer};
+use crate::complete::{FieldKind, collection_completer, field_completer};
 use crate::domain::{
     AggregateQuery, Aggregation, AnyPath, CollectionId, DatabaseId, DbTarget, DeleteDoc, DocPath,
     FieldOp, FieldPath, Filter, Guard, IdError, Limit, NonEmptyVec, OrderBy, ProjectId, Query,
@@ -81,7 +81,7 @@ Environment:
   Flags win over environment variables.
 
 Completion:
-  Add `source <(COMPLETE=zsh fsq)` (or `COMPLETE=bash`) to your shell's rc file. TAB then
+  Add `source <(FSQ_COMPLETE=zsh fsq)` (or `FSQ_COMPLETE=bash`) to your rc file. TAB then
   completes collection ids and field names from the database (needs --project or
   FSQ_PROJECT; answers are cached for 10 minutes in $XDG_CACHE_HOME/fsq).
 
@@ -169,7 +169,7 @@ pub enum CompletionShell {
 }
 
 impl CompletionShell {
-    /// The value of `COMPLETE` that selects this shell.
+    /// The value of `FSQ_COMPLETE` that selects this shell.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
@@ -303,7 +303,7 @@ pub struct Selection {
     /// whole filter. Operators: == != < <= > >= in not-in array-contains
     /// array-contains-any; `in`, `not-in` and `array-contains-any` take a list `[a, b]`.
     /// Values: 18, 1.5, true, null, ts:2026-01-05T10:00:00Z, ref:users/u1, "quoted text".
-    #[arg(long = "where", value_name = "FILTER", action = clap::ArgAction::Append, add = field_completer())]
+    #[arg(long = "where", value_name = "FILTER", action = clap::ArgAction::Append, add = field_completer(FieldKind::Where))]
     where_: Vec<Filter>,
 }
 
@@ -345,7 +345,7 @@ pub enum Cmd {
         #[command(flatten)]
         selection: Selection,
         /// Sort term `field` or `field:desc`; repeat for several.
-        #[arg(long, value_name = "FIELD[:asc|desc]", action = clap::ArgAction::Append, add = field_completer())]
+        #[arg(long, value_name = "FIELD[:asc|desc]", action = clap::ArgAction::Append, add = field_completer(FieldKind::OrderBy))]
         order_by: Vec<OrderBy>,
         /// Maximum documents returned.
         #[arg(long, value_name = "N", conflicts_with = "all")]
@@ -357,7 +357,7 @@ pub enum Cmd {
         #[arg(long, value_name = "N", default_value_t = 0)]
         offset: u32,
         /// Return only these fields, comma separated: `name,address.city`.
-        #[arg(long, value_name = "FIELDS", add = field_completer())]
+        #[arg(long, value_name = "FIELDS", add = field_completer(FieldKind::Select))]
         select: Option<FieldList>,
     },
     /// Count documents, or sum/average a numeric field, on the server.
@@ -366,10 +366,10 @@ pub enum Cmd {
         #[command(flatten)]
         selection: Selection,
         /// Also sum this field; repeat for several fields.
-        #[arg(long, value_name = "FIELD", value_parser = strict_field, action = clap::ArgAction::Append, add = field_completer())]
+        #[arg(long, value_name = "FIELD", value_parser = strict_field, action = clap::ArgAction::Append, add = field_completer(FieldKind::Single))]
         sum: Vec<FieldPath>,
         /// Also average this field; repeat for several fields.
-        #[arg(long, value_name = "FIELD", value_parser = strict_field, action = clap::ArgAction::Append, add = field_completer())]
+        #[arg(long, value_name = "FIELD", value_parser = strict_field, action = clap::ArgAction::Append, add = field_completer(FieldKind::Single))]
         avg: Vec<FieldPath>,
     },
     /// List collection ids: the root ones, or those under a document.
@@ -419,7 +419,7 @@ pub enum Cmd {
             value_name = "OP",
             required = true,
             action = clap::ArgAction::Append,
-            add = field_completer()
+            add = field_completer(FieldKind::Single)
         )]
         set: Vec<FieldOp>,
         /// Only write if the document's _updateTime is exactly this.

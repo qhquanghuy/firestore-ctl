@@ -1,20 +1,33 @@
-//! Dynamic shell completion (`COMPLETE=<shell> fsq`): collection ids and field names are
-//! looked up in the database being addressed while the user presses TAB.
+//! Dynamic shell completion (`FSQ_COMPLETE=<shell> fsq`): collection ids and field names
+//! are looked up in the database being addressed while the user presses TAB.
 //!
 //! Completion must never get in the way, so every completer here is best effort:
 //! - it returns no candidates on any failure (no project, no credentials, timeout, ...);
 //! - it prints nothing itself (stdout is the completion protocol);
 //! - it only reads Firestore, and its only side effect is writing the cache files below;
-//! - it gives up after [`DEADLINE`], connecting included.
+//! - it gives up after [`DEADLINE`], connecting included, and after a failure does not try
+//!   again for [`FAILURE_TTL`], so an offline user is slowed down once a minute at most.
 //!
 //! The database and collection come from the words already typed (`--project`,
 //! `--database`, the collection argument), then from `FSQ_PROJECT` / `FSQ_DATABASE`.
 //! Answers are cached for [`CACHE_TTL`] under
 //! `$XDG_CACHE_HOME/fsq/<project>/<database>/` (`~/.cache` when unset).
+//!
+//! # Reliance on `clap_complete` internals
+//! This is built on `clap_complete`'s `unstable-dynamic` feature, which is why the crate
+//! pins `clap_complete = "~4.6"`. Besides its public API we depend on the layout its shell
+//! scripts use to call the binary: the words after a `--` argument, the position of the
+//! word being completed in `_CLAP_COMPLETE_INDEX`, the separator in `_CLAP_IFS`, and the
+//! text of the bash registration script (patched in [`bash`]). Re-check all of them, and
+//! the tests that cover them, before moving the pin.
+
+mod bash;
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
+use std::fmt::Write as _;
 use std::fs;
+use std::io;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -22,6 +35,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{ArgMatches, CommandFactory};
 use clap_complete::engine::{ArgValueCompleter, CompletionCandidate};
+use clap_complete::env::{Elvish, Fish, Powershell, Shells, Zsh};
 use itertools::Itertools;
 use serde_json::json;
 
@@ -33,19 +47,33 @@ use crate::grpc;
 use crate::parse::unquoted;
 use crate::port::Firestore;
 
-/// Everything a completer does, connecting included, must finish within this.
+/// The environment variable that turns `fsq` into a completion helper (`FSQ_COMPLETE=zsh
+/// fsq` prints the registration script). Not the `clap_complete` default, `COMPLETE`: a
+/// stray `COMPLETE` in someone's environment must not hijack the program.
+pub const COMPLETE_VAR: &str = "FSQ_COMPLETE";
+
+/// Everything a lookup does, connecting included, must finish within this.
 const DEADLINE: Duration = Duration::from_secs(2);
 /// How long a cached answer is trusted.
 const CACHE_TTL: Duration = Duration::from_mins(10);
+/// How long a failed lookup is remembered (and not repeated).
+const FAILURE_TTL: Duration = Duration::from_mins(1);
 /// Documents sampled to discover field names.
 const SAMPLE_SIZE: NonZeroU32 = NonZeroU32::new(20).unwrap();
 /// Deepest nesting offered: `a.b.c` has depth 3.
 const MAX_FIELD_DEPTH: usize = 3;
 
+/// The shells that can be completed: `clap_complete`'s, with bash made safe for field
+/// names that are not plain words (see [`bash`]).
+#[must_use]
+pub fn shells() -> Shells<'static> {
+    Shells(&[&bash::FsqBash, &Elvish, &Fish, &Powershell, &Zsh])
+}
+
 /// The line that enables completion in `shell`; what `fsq completions <shell>` prints.
 #[must_use]
 pub fn registration_line(shell: CompletionShell) -> String {
-    format!("source <(COMPLETE={} fsq)", shell.name())
+    format!("source <({COMPLETE_VAR}={} fsq)", shell.name())
 }
 
 /// Completer for collection ids (the collection argument, `--group`).
@@ -63,15 +91,29 @@ pub fn collection_completer() -> ArgValueCompleter {
     })
 }
 
-/// Completer for the field part of `--where`, `--order-by`, `--select`, `--sum`, `--avg`
-/// and `--set`: field names sampled from the collection already typed on the command line.
+/// The flag a field completer serves. It decides what may follow the field name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldKind {
+    /// `--where`: an operator follows (`age >=`).
+    Where,
+    /// `--order-by`: a direction follows (`age:desc`).
+    OrderBy,
+    /// `--select`: a comma separated list of fields.
+    Select,
+    /// `--sum`, `--avg`, `--set`: the field name alone (`--set`'s `=value` is not completed).
+    Single,
+}
+
+/// Completer for the field part of the flag value `kind`: field names sampled from the
+/// collection already typed on the command line.
 #[must_use]
-pub fn field_completer() -> ArgValueCompleter {
-    ArgValueCompleter::new(|current: &OsStr| {
+pub fn field_completer(kind: FieldKind) -> ArgValueCompleter {
+    ArgValueCompleter::new(move |current: &OsStr| {
         silently(|| {
             let current = current.to_str()?;
             Some(field_candidates(
                 &Invocation::from_process(),
+                kind,
                 current,
                 SystemTime::now(),
             ))
@@ -80,12 +122,14 @@ pub fn field_completer() -> ArgValueCompleter {
 }
 
 /// The candidates `complete` finds, or none if it finds nothing or panics. A panic
-/// (say, inside a dependency) must not print its message: stderr is the user's terminal
-/// in the middle of typing. The process exits right after completing, so the silenced
-/// panic hook is not restored.
+/// (say, inside a dependency) must not print its message in a release build: stderr is
+/// the user's terminal in the middle of typing. Debug builds (and so the test suite) keep
+/// the message. The process exits right after completing, so the silenced hook is not
+/// restored.
 fn silently(
     complete: impl FnOnce() -> Option<Vec<CompletionCandidate>>,
 ) -> Vec<CompletionCandidate> {
+    #[cfg(not(debug_assertions))]
     std::panic::set_hook(Box::new(|_| {}));
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(complete))
         .ok()
@@ -129,6 +173,9 @@ struct Invocation {
     scope: Option<Scope>,
     /// Where the cache lives; `None` when there is no usable home.
     cache_base: Option<PathBuf>,
+    /// The Firestore emulator in use (`FIRESTORE_EMULATOR_HOST`): its data is not the
+    /// database's, so it is cached apart.
+    emulator: Option<String>,
     /// The cursor word is the tail of one the shell cut at `:` or `=`, see [`Typed::detached`].
     detached: bool,
 }
@@ -161,13 +208,14 @@ impl Invocation {
             target: conn.target(env).ok().flatten(),
             scope: matches.as_ref().and_then(scope_of),
             cache_base: cache_base(env),
+            emulator: env("FIRESTORE_EMULATOR_HOST").filter(|host| !host.is_empty()),
             detached: false,
         }
     }
 
     fn cache(&self) -> Option<Cache> {
         let (base, target) = self.cache_base.as_ref().zip(self.target.as_ref())?;
-        Some(Cache::new(base, target, CACHE_TTL))
+        Some(Cache::new(base, target, self.emulator.as_deref()))
     }
 }
 
@@ -294,15 +342,20 @@ fn collection_candidates(
     .collect()
 }
 
-/// Candidates for the word `current` of a field-taking flag. zsh hands over the word with
-/// the quote it was opened with (`'age >`); the quote is ignored, and left out of the
+/// Candidates for the word `current` of the flag value `kind`. zsh hands over the word
+/// with the quote it was opened with (`'age >`); the quote is ignored, and left out of the
 /// candidates: the shell matches them against the text inside the quote and keeps it open.
-fn field_candidates(inv: &Invocation, current: &str, now: SystemTime) -> Vec<CompletionCandidate> {
+fn field_candidates(
+    inv: &Invocation,
+    kind: FieldKind,
+    current: &str,
+    now: SystemTime,
+) -> Vec<CompletionCandidate> {
     if inv.detached {
         return Vec::new();
     }
     let word = current.trim_start_matches(['\'', '"']);
-    let candidates = match field_position(word) {
+    let candidates = match field_position(kind, word) {
         FieldPosition::Literal(candidates) => candidates,
         FieldPosition::Field { kept, typed } => inv
             .target
@@ -315,7 +368,7 @@ fn field_candidates(inv: &Invocation, current: &str, now: SystemTime) -> Vec<Com
             })
             .unwrap_or_default()
             .into_iter()
-            .filter(|field| field.starts_with(typed))
+            .filter(|field| names_field(field, typed))
             .map(|field| format!("{kept}{field}"))
             .collect(),
         FieldPosition::Nothing => Vec::new(),
@@ -324,6 +377,14 @@ fn field_candidates(inv: &Invocation, current: &str, now: SystemTime) -> Vec<Com
         .into_iter()
         .map(CompletionCandidate::new)
         .collect()
+}
+
+/// Whether `typed` starts the field `field` (as Firestore renders it, so quoted if need
+/// be): either as written or without the quoting, so that `my` finds `` `my-field` ``.
+fn names_field(field: &str, typed: &str) -> bool {
+    field.starts_with(typed)
+        || FieldPath::from_str(field)
+            .is_ok_and(|path| path.segments().iter().join(".").starts_with(typed))
 }
 
 /// The sort directions starting with `typed`.
@@ -353,22 +414,23 @@ fn ends_field(c: char) -> bool {
     c.is_whitespace() || FIELD_BREAKS.contains(c)
 }
 
-/// Where in a field-taking flag value (`age`, `a,b`, `age >`, `name:`, `tags+=x`) the
+/// Where in the value of the flag `kind` (`age`, `a,b`, `age >`, `name:`, `tags+=x`) the
 /// cursor is. Only the field part is completed; after it, `--where` gets operators and
-/// `--order-by` gets `asc`/`desc`, and values get nothing.
-fn field_position(current: &str) -> FieldPosition<'_> {
+/// `--order-by` gets `asc`/`desc`, and anything else (values, other kinds' syntax) gets
+/// nothing.
+fn field_position(kind: FieldKind, current: &str) -> FieldPosition<'_> {
     let last_comma = unquoted(current, '`')
         .filter(|&(_, c)| c == ',')
         .map(|(i, _)| i)
-        .last();
+        .last()
+        .filter(|_| kind == FieldKind::Select);
     let (kept, tail) = last_comma.map_or(("", current), |i| current.split_at(i + 1));
-    // `x in [1,2`: the part before the comma is not a list of fields.
     if !unquoted(kept, '`').all(|(_, c)| c == ',' || !ends_field(c)) {
         return FieldPosition::Nothing;
     }
-    match unquoted(tail, '`').find(|&(_, c)| ends_field(c)) {
-        None => FieldPosition::Field { kept, typed: tail },
-        Some((i @ 1.., c)) if c.is_whitespace() && kept.is_empty() => {
+    match (kind, unquoted(tail, '`').find(|&(_, c)| ends_field(c))) {
+        (_, None) => FieldPosition::Field { kept, typed: tail },
+        (FieldKind::Where, Some((i @ 1.., c))) if c.is_whitespace() => {
             let (field, rest) = (&tail[..i], tail[i..].trim_start());
             if rest.contains(char::is_whitespace) {
                 return FieldPosition::Nothing;
@@ -382,18 +444,18 @@ fn field_position(current: &str) -> FieldPosition<'_> {
                     .collect(),
             )
         }
-        Some((i @ 1.., ':')) => {
+        (FieldKind::OrderBy, Some((i @ 1.., ':'))) => {
             let (field, rest) = (&tail[..i], &tail[i + 1..]);
             if unquoted(rest, '`').any(|(_, c)| ends_field(c)) {
                 return FieldPosition::Nothing;
             }
             FieldPosition::Literal(
                 directions(rest)
-                    .map(|direction| format!("{kept}{field}:{direction}"))
+                    .map(|direction| format!("{field}:{direction}"))
                     .collect(),
             )
         }
-        Some(_) => FieldPosition::Nothing,
+        _ => FieldPosition::Nothing,
     }
 }
 
@@ -449,23 +511,48 @@ fn within_deadline<T>(lookup: impl Future<Output = Option<T>>) -> Option<T> {
 
 // ---- cache ----
 
+/// What a lookup left in the cache.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Entry {
+    /// The lookup found these items.
+    Found(Vec<String>),
+    /// The lookup failed (or timed out); do not repeat it for a while.
+    Failed,
+}
+
+impl Entry {
+    fn into_items(self) -> Vec<String> {
+        match self {
+            Self::Found(items) => items,
+            Self::Failed => Vec::new(),
+        }
+    }
+}
+
 /// Answers of earlier lookups for one database, one JSON file per question. Entries
 /// carry the time they were written, so staleness is a pure function of the clock.
 #[derive(Debug)]
 struct Cache {
     dir: PathBuf,
+    /// How long a found answer is trusted.
     ttl: Duration,
+    /// How long a failure is remembered.
+    failure_ttl: Duration,
 }
 
 impl Cache {
-    /// `<base>/fsq/<project>/<database>`.
-    fn new(base: &Path, target: &DbTarget, ttl: Duration) -> Self {
+    /// `<base>/fsq/<project>/<database>`, below `emulator-<host>` for an emulator.
+    fn new(base: &Path, target: &DbTarget, emulator: Option<&str>) -> Self {
+        let database = base
+            .join("fsq")
+            .join(target.project.as_str())
+            .join(target.database.as_str());
         Self {
-            dir: base
-                .join("fsq")
-                .join(target.project.as_str())
-                .join(target.database.as_str()),
-            ttl,
+            dir: emulator.map_or(database.clone(), |host| {
+                database.join(format!("emulator-{}", escape_name(host)))
+            }),
+            ttl: CACHE_TTL,
+            failure_ttl: FAILURE_TTL,
         }
     }
 
@@ -473,29 +560,47 @@ impl Cache {
         self.dir.join(format!("{name}.json"))
     }
 
-    /// The items stored under `name` if they were written at most `ttl` before `now`.
-    fn read(&self, name: &str, now: SystemTime) -> Option<Vec<String>> {
+    /// What is stored under `name`, unless it is older than its time to live or stamped
+    /// in the future (a clock that went backwards, or a damaged file: either way not to
+    /// be trusted).
+    fn read(&self, name: &str, now: SystemTime) -> Option<Entry> {
         let entry: serde_json::Value =
             serde_json::from_slice(&fs::read(self.file(name)).ok()?).ok()?;
-        let written = entry.get("written")?.as_u64()?;
-        let fresh = unix_seconds(now).saturating_sub(written) <= self.ttl.as_secs();
-        fresh.then(|| {
+        let age = unix_seconds(now).checked_sub(entry.get("written")?.as_u64()?)?;
+        if entry.get("failed").and_then(serde_json::Value::as_bool) == Some(true) {
+            return (age <= self.failure_ttl.as_secs()).then_some(Entry::Failed);
+        }
+        (age <= self.ttl.as_secs()).then(|| {
             entry
                 .get("items")?
                 .as_array()?
                 .iter()
                 .map(|item| item.as_str().map(str::to_owned))
-                .collect()
+                .collect::<Option<Vec<_>>>()
+                .map(Entry::Found)
         })?
     }
 
-    /// Stores `items` under `name`, stamped `now`. Failing to write is not an error: the
-    /// cache only saves time.
-    fn write(&self, name: &str, now: SystemTime, items: &[String]) {
-        let entry = json!({ "written": unix_seconds(now), "items": items });
-        let _ = fs::create_dir_all(&self.dir)
-            .and_then(|()| fs::write(self.file(name), entry.to_string()));
+    /// Stores `entry` under `name`, stamped `now`. Failing to write is not an error: the
+    /// cache only saves time. The directories are private to the user.
+    fn write(&self, name: &str, now: SystemTime, entry: &Entry) {
+        let written = unix_seconds(now);
+        let body = match entry {
+            Entry::Found(items) => json!({ "written": written, "items": items }),
+            Entry::Failed => json!({ "written": written, "failed": true }),
+        };
+        let _ = create_private_dir(&self.dir)
+            .and_then(|()| fs::write(self.file(name), body.to_string()));
     }
+}
+
+/// Creates `dir` and its missing parents, readable by the user only (on unix).
+fn create_private_dir(dir: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)
 }
 
 fn unix_seconds(t: SystemTime) -> u64 {
@@ -508,24 +613,38 @@ fn cache_base(env: &impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
     absolute("XDG_CACHE_HOME").or_else(|| absolute("HOME").map(|home| home.join(".cache")))
 }
 
-/// The cache entry name for the fields of `scope`: `fields-<collection path>`, with `/`
-/// (not allowed in a file name) written as `~`; a collection group is
-/// `fields-group~<id>`, then `~<parent document>`. A collection path has an odd number
-/// of segments and these an even number, so the two kinds never share a name.
+/// `text` as one file name component: everything but ASCII letters, digits and `_` is
+/// written as `%XX` (per UTF-8 byte). Injective, so different texts never share a name,
+/// and free of `/`, `.`, `-` and `~`, which the names built from it use as separators.
+fn escape_name(text: &str) -> String {
+    text.bytes().fold(String::new(), |mut out, b| {
+        if b.is_ascii_alphanumeric() || b == b'_' {
+            out.push(char::from(b));
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+        out
+    })
+}
+
+/// The cache entry name for the fields of `scope`: `fields-c-<collection path>`, or
+/// `fields-g-<id>[-<parent document>]` for a collection group; the parts are
+/// [escaped](escape_name).
 fn fields_cache_name(scope: &Scope) -> String {
-    let flat = |path: &dyn ToString| path.to_string().replace('/', "~");
+    let part = |text: &dyn ToString| escape_name(&text.to_string());
     match scope {
-        Scope::Collection(path) => format!("fields-{}", flat(path)),
-        Scope::Group { id, parent: None } => format!("fields-group~{id}"),
+        Scope::Collection(path) => format!("fields-c-{}", part(path)),
+        Scope::Group { id, parent: None } => format!("fields-g-{}", part(id)),
         Scope::Group {
             id,
             parent: Some(parent),
-        } => format!("fields-group~{id}~{}", flat(parent)),
+        } => format!("fields-g-{}-{}", part(id), part(parent)),
     }
 }
 
 /// The items cached under `name`, else what `fetch` finds (which is then cached). A
-/// failed lookup (`None`) is neither cached nor an error: there is just nothing to offer.
+/// failed lookup is cached too, briefly: there is nothing to offer, and asking again on
+/// every TAB would cost a full timeout each time.
 fn cached(
     cache: Option<&Cache>,
     name: &str,
@@ -534,14 +653,14 @@ fn cached(
 ) -> Vec<String> {
     cache
         .and_then(|cache| cache.read(name, now))
-        .or_else(|| {
-            let fresh = fetch()?;
+        .unwrap_or_else(|| {
+            let fresh = fetch().map_or(Entry::Failed, Entry::Found);
             if let Some(cache) = cache {
                 cache.write(name, now, &fresh);
             }
-            Some(fresh)
+            fresh
         })
-        .unwrap_or_default()
+        .into_items()
 }
 
 #[cfg(test)]
@@ -592,6 +711,10 @@ mod tests {
             .collect()
     }
 
+    fn none() -> Vec<String> {
+        Vec::new()
+    }
+
     #[test]
     fn field_names_include_nested() {
         let data = [
@@ -638,7 +761,12 @@ mod tests {
         Cache {
             dir: dir.to_owned(),
             ttl: Duration::from_secs(600),
+            failure_ttl: Duration::from_secs(60),
         }
+    }
+
+    fn found(items: &[&str]) -> Entry {
+        Entry::Found(items.iter().map(|i| (*i).to_owned()).collect())
     }
 
     fn at(secs: u64) -> SystemTime {
@@ -649,58 +777,104 @@ mod tests {
     fn cache_expires_after_ttl() {
         let dir = tempfile::tempdir().unwrap();
         let cache = cache_in(dir.path());
-        cache.write("collections", at(1_000), &["users".to_owned()]);
+        cache.write("collections", at(1_000), &found(&["users"]));
         let read = |t| cache.read("collections", at(t));
-        assert_eq!(read(1_000), Some(vec!["users".to_owned()]));
-        assert_eq!(read(1_600), Some(vec!["users".to_owned()]));
+        assert_eq!(read(1_000), Some(found(&["users"])));
+        assert_eq!(read(1_600), Some(found(&["users"])));
         assert_eq!(read(1_601), None);
         assert_eq!(cache.read("other", at(1_000)), None);
+    }
+
+    #[test]
+    fn cache_entries_stamped_in_the_future_are_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(dir.path());
+        cache.write("k", at(5_000), &found(&["a"]));
+        assert_eq!(cache.read("k", at(5_000)), Some(found(&["a"])));
+        assert_eq!(cache.read("k", at(4_999)), None);
+        cache.write("f", at(5_000), &Entry::Failed);
+        assert_eq!(cache.read("f", at(1)), None);
     }
 
     #[test]
     fn cache_survives_missing_dirs_and_garbage() {
         let dir = tempfile::tempdir().unwrap();
         let cache = cache_in(&dir.path().join("a/b"));
-        cache.write("x", at(5), &["1".to_owned()]);
-        assert_eq!(cache.read("x", at(5)), Some(vec!["1".to_owned()]));
+        cache.write("x", at(5), &found(&["1"]));
+        assert_eq!(cache.read("x", at(5)), Some(found(&["1"])));
         fs::write(cache.file("x"), "not json").unwrap();
+        assert_eq!(cache.read("x", at(5)), None);
+        fs::write(cache.file("x"), r#"{"written":5,"items":[1]}"#).unwrap();
         assert_eq!(cache.read("x", at(5)), None);
         // An unwritable location is ignored, not an error.
         let blocked = dir.path().join("file");
         fs::write(&blocked, "").unwrap();
-        cache_in(&blocked.join("sub")).write("x", at(5), &[]);
+        cache_in(&blocked.join("sub")).write("x", at(5), &found(&[]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_directories_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let leaf = dir.path().join("fsq/p/d");
+        cache_in(&leaf).write("x", at(1), &found(&[]));
+        for created in [&leaf, &dir.path().join("fsq/p"), &dir.path().join("fsq")] {
+            let mode = fs::metadata(created).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{}", created.display());
+        }
     }
 
     #[test]
-    fn cache_layout_follows_project_and_database() {
+    fn cache_layout_follows_project_database_and_emulator() {
         let target = DbTarget {
             project: "p".parse().unwrap(),
             database: "(default)".parse().unwrap(),
         };
-        let cache = Cache::new(Path::new("/c"), &target, CACHE_TTL);
+        let base = Path::new("/c");
         assert_eq!(
-            cache.file("collections"),
+            Cache::new(base, &target, None).file("collections"),
             Path::new("/c/fsq/p/(default)/collections.json")
         );
-        let scope = |path: &str| Scope::Collection(path.parse().unwrap());
-        assert_eq!(fields_cache_name(&scope("users")), "fields-users");
         assert_eq!(
-            fields_cache_name(&scope("users/u1/orders")),
-            "fields-users~u1~orders"
-        );
-        let group = |parent: Option<&str>| Scope::Group {
-            parent: parent.map(|p| p.parse().unwrap()),
-            id: "orders".parse().unwrap(),
-        };
-        assert_eq!(fields_cache_name(&group(None)), "fields-group~orders");
-        assert_eq!(
-            fields_cache_name(&group(Some("users/u1"))),
-            "fields-group~orders~users~u1"
+            Cache::new(base, &target, Some("localhost:8080")).file("collections"),
+            Path::new("/c/fsq/p/(default)/emulator-localhost%3A8080/collections.json")
         );
     }
 
     #[test]
-    fn cached_fetches_once_and_never_caches_failures() {
+    fn cache_names_are_injective() {
+        assert_eq!(escape_name("users"), "users");
+        assert_eq!(escape_name("a/b~c-d.e f"), "a%2Fb%7Ec%2Dd%2Ee%20f");
+        assert_eq!(escape_name("é"), "%C3%A9");
+        let scope = |path: &str| Scope::Collection(path.parse().unwrap());
+        let group = |id: &str, parent: Option<&str>| Scope::Group {
+            parent: parent.map(|p| p.parse().unwrap()),
+            id: id.parse().unwrap(),
+        };
+        let all = [
+            scope("users"),
+            scope("users/u1/orders"),
+            scope("users~u1/x/orders"),
+            scope("a-b"),
+            scope("a/b/c"),
+            group("orders", None),
+            group("orders", Some("users/u1")),
+            group("orders-users", None),
+            group("a", Some("b/c")),
+            group("a-b", Some("c/d")),
+        ];
+        let names = all.iter().map(fields_cache_name).collect_vec();
+        assert_eq!(names.iter().unique().count(), all.len(), "{names:?}");
+        assert_eq!(names[0], "fields-c-users");
+        assert_eq!(names[1], "fields-c-users%2Fu1%2Forders");
+        assert_eq!(names[5], "fields-g-orders");
+        assert_eq!(names[6], "fields-g-orders-users%2Fu1");
+        assert!(names.iter().all(|n| !n.contains('/')));
+    }
+
+    #[test]
+    fn cached_fetches_once_and_caches_what_it_found() {
         let dir = tempfile::tempdir().unwrap();
         let cache = cache_in(dir.path());
         let calls = Cell::new(0);
@@ -711,27 +885,44 @@ mod tests {
                 result
             }
         };
+        let some = |item: &str| Some(vec![item.to_owned()]);
+        assert_eq!(cached(Some(&cache), "k", at(1), fetch(some("a"))), ["a"]);
+        assert_eq!(cached(Some(&cache), "k", at(2), fetch(some("b"))), ["a"]);
+        assert_eq!(calls.get(), 1);
         assert_eq!(
-            cached(Some(&cache), "k", at(1), fetch(None)),
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            cached(Some(&cache), "k", at(1), fetch(Some(vec!["a".into()]))),
-            ["a"]
-        );
-        assert_eq!(
-            cached(Some(&cache), "k", at(2), fetch(Some(vec!["b".into()]))),
-            ["a"]
-        );
-        assert_eq!(calls.get(), 2);
-        assert_eq!(
-            cached(Some(&cache), "k", at(5_000), fetch(Some(vec!["c".into()]))),
+            cached(Some(&cache), "k", at(5_000), fetch(some("c"))),
             ["c"]
         );
-        assert_eq!(
-            cached(None, "k", at(1), fetch(Some(vec!["d".into()]))),
-            ["d"]
-        );
+        assert_eq!(cached(None, "k", at(1), fetch(some("d"))), ["d"]);
+        assert_eq!(cached(None, "k", at(1), fetch(some("e"))), ["e"]);
+        assert_eq!(calls.get(), 4);
+    }
+
+    #[test]
+    fn failed_lookups_are_not_repeated_for_a_minute() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(dir.path());
+        let calls = Cell::new(0);
+        let fail = || {
+            calls.set(calls.get() + 1);
+            None
+        };
+        assert_eq!(cached(Some(&cache), "k", at(1_000), fail), none());
+        assert_eq!(calls.get(), 1);
+        assert_eq!(cached(Some(&cache), "k", at(1_059), fail), none());
+        assert_eq!(cached(Some(&cache), "k", at(1_060), fail), none());
+        assert_eq!(calls.get(), 1);
+        // A minute later the lookup is tried again, and may succeed.
+        assert_eq!(cached(Some(&cache), "k", at(1_061), fail), none());
+        assert_eq!(calls.get(), 2);
+        let ok = || Some(vec!["a".to_owned()]);
+        assert_eq!(cached(Some(&cache), "k", at(1_200), ok), ["a"]);
+        // Other lookups are not held back by it.
+        assert_eq!(cached(Some(&cache), "other", at(1_200), ok), ["a"]);
+        // Without a cache every call looks up.
+        assert_eq!(cached(None, "k", at(1_000), fail), none());
+        assert_eq!(cached(None, "k", at(1_000), fail), none());
+        assert_eq!(calls.get(), 4);
     }
 
     #[test]
@@ -757,26 +948,18 @@ mod tests {
     fn completer_is_silent_without_project() {
         let inv = Invocation::new(&words("fsq query users --where"), &no_env);
         assert_eq!(inv.target, None);
-        assert_eq!(
-            values(&collection_candidates(&inv, "", at(0))),
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            values(&field_candidates(&inv, "", at(0))),
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            values(&field_candidates(&inv, "na", at(0))),
-            Vec::<String>::new()
-        );
+        assert_eq!(values(&collection_candidates(&inv, "", at(0))), none());
+        for kind in [FieldKind::Where, FieldKind::Select] {
+            for typed in ["", "na"] {
+                assert_eq!(values(&field_candidates(&inv, kind, typed, at(0))), none());
+            }
+        }
         let empty = Invocation::new(&[], &no_env);
-        assert_eq!(
-            values(&collection_candidates(&empty, "", at(0))),
-            Vec::<String>::new()
-        );
+        assert_eq!(values(&collection_candidates(&empty, "", at(0))), none());
         // Empty variables count as unset.
         let blank = Invocation::new(&words("fsq query"), &|_: &str| Some(String::new()));
         assert_eq!(blank.target, None);
+        assert_eq!(blank.emulator, None);
     }
 
     #[test]
@@ -906,8 +1089,8 @@ mod tests {
         assert_eq!(hints("fsq --project Bad query users", &[]).0, None);
     }
 
-    fn position(current: &str) -> Vec<String> {
-        match field_position(current) {
+    fn position(kind: FieldKind, current: &str) -> Vec<String> {
+        match field_position(kind, current) {
             FieldPosition::Field { kept, typed } => vec![format!("field {kept}|{typed}")],
             FieldPosition::Literal(items) => items,
             FieldPosition::Nothing => Vec::new(),
@@ -915,58 +1098,88 @@ mod tests {
     }
 
     #[test]
-    fn field_position_completes_only_the_field_part() {
-        assert_eq!(position(""), ["field |"]);
-        assert_eq!(position("na"), ["field |na"]);
-        assert_eq!(position("address.ci"), ["field |address.ci"]);
-        assert_eq!(position("`my fi"), ["field |`my fi"]);
-        assert_eq!(position("name,ad"), ["field name,|ad"]);
-        assert_eq!(position("`a,b`.c,ad"), ["field `a,b`.c,|ad"]);
-        assert_eq!(position("name,"), ["field name,|"]);
-        // Past the field part: nothing, except operators after `--where`'s field.
-        for past in [
-            "name=",
-            "name=Jo",
-            "tags+=x",
-            "tags-=[a",
-            "age>",
-            "age >= 1",
-            r#"n == "a b""#,
-            "x in [1,2",
-            "age >= [1,2",
-            " x",
-            "name ==  ",
+    fn every_kind_completes_a_field_name() {
+        for kind in [
+            FieldKind::Where,
+            FieldKind::OrderBy,
+            FieldKind::Select,
+            FieldKind::Single,
         ] {
-            assert!(position(past).is_empty(), "{past}");
+            assert_eq!(position(kind, ""), ["field |"]);
+            assert_eq!(position(kind, "na"), ["field |na"]);
+            assert_eq!(position(kind, "address.ci"), ["field |address.ci"]);
+            assert_eq!(position(kind, "`my fi"), ["field |`my fi"]);
+            for past in ["name=", "name=Jo", "tags+=x", "tags-=[a", "age>", " x"] {
+                assert_eq!(position(kind, past), none(), "{kind:?} {past}");
+            }
         }
     }
 
     #[test]
-    fn field_position_offers_operators_and_directions() {
-        assert_eq!(position("age ").len(), 10);
-        assert_eq!(position("age >"), ["age >", "age >="]);
-        assert_eq!(
-            position("`my field` ar"),
-            ["`my field` array-contains", "`my field` array-contains-any"]
-        );
-        assert_eq!(position("age not"), ["age not-in"]);
-        assert_eq!(position("age zz"), Vec::<String>::new());
-        assert_eq!(position("age:"), ["age:asc", "age:desc"]);
-        assert_eq!(position("age:d"), ["age:desc"]);
-        assert_eq!(position("age:desc"), ["age:desc"]);
-        assert_eq!(position("age:desc:"), Vec::<String>::new());
-        assert_eq!(position(":d"), Vec::<String>::new());
+    fn only_select_completes_a_comma_list() {
+        let select = |s| position(FieldKind::Select, s);
+        assert_eq!(select("name,ad"), ["field name,|ad"]);
+        assert_eq!(select("`a,b`.c,ad"), ["field `a,b`.c,|ad"]);
+        assert_eq!(select("name,"), ["field name,|"]);
+        assert_eq!(select("name ,x"), none());
+        assert_eq!(select("name:desc,x"), none());
+        for kind in [FieldKind::Where, FieldKind::OrderBy, FieldKind::Single] {
+            assert_eq!(position(kind, "name,ad"), none(), "{kind:?}");
+            assert_eq!(position(kind, "name,"), none(), "{kind:?}");
+        }
     }
 
     #[test]
-    fn registration_line_names_the_shell() {
+    fn only_where_offers_operators() {
+        let wh = |s| position(FieldKind::Where, s);
+        assert_eq!(wh("age ").len(), 10);
+        assert_eq!(wh("age >"), ["age >", "age >="]);
+        assert_eq!(
+            wh("`my field` ar"),
+            ["`my field` array-contains", "`my field` array-contains-any"]
+        );
+        assert_eq!(wh("age not"), ["age not-in"]);
+        assert_eq!(wh("age zz"), none());
+        for past in [
+            "age >= 1",
+            r#"n == "a b""#,
+            "x in [1,2",
+            "age >= [1,2",
+            "name ==  ",
+            " x",
+        ] {
+            assert_eq!(wh(past), none(), "{past}");
+        }
+        for kind in [FieldKind::OrderBy, FieldKind::Select, FieldKind::Single] {
+            assert_eq!(position(kind, "age "), none(), "{kind:?}");
+            assert_eq!(position(kind, "age >"), none(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn only_order_by_offers_directions() {
+        let ob = |s| position(FieldKind::OrderBy, s);
+        assert_eq!(ob("age:"), ["age:asc", "age:desc"]);
+        assert_eq!(ob("age:d"), ["age:desc"]);
+        assert_eq!(ob("age:desc"), ["age:desc"]);
+        assert_eq!(ob("age:desc:"), none());
+        assert_eq!(ob(":d"), none());
+        assert_eq!(ob("age "), none());
+        for kind in [FieldKind::Where, FieldKind::Select, FieldKind::Single] {
+            assert_eq!(position(kind, "age:"), none(), "{kind:?}");
+            assert_eq!(position(kind, "age:d"), none(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn registration_line_names_the_variable_and_the_shell() {
         assert_eq!(
             registration_line(CompletionShell::Zsh),
-            "source <(COMPLETE=zsh fsq)"
+            "source <(FSQ_COMPLETE=zsh fsq)"
         );
         assert_eq!(
             registration_line(CompletionShell::Bash),
-            "source <(COMPLETE=bash fsq)"
+            "source <(FSQ_COMPLETE=bash fsq)"
         );
     }
 
@@ -974,11 +1187,16 @@ mod tests {
     fn a_leading_shell_quote_is_ignored() {
         let inv = Invocation::new(&words("fsq query users"), &no_env);
         assert_eq!(
-            values(&field_candidates(&inv, "'age >", at(0))),
+            values(&field_candidates(&inv, FieldKind::Where, "'age >", at(0))),
             ["age >", "age >="]
         );
         assert_eq!(
-            values(&field_candidates(&inv, "\"age:d", at(0))),
+            values(&field_candidates(
+                &inv,
+                FieldKind::OrderBy,
+                "\"age:d",
+                at(0)
+            )),
             ["age:desc"]
         );
     }
@@ -989,13 +1207,10 @@ mod tests {
             detached: true,
             ..Invocation::new(&words("fsq --project p query users"), &no_env)
         };
+        assert_eq!(values(&collection_candidates(&inv, "x", at(0))), none());
         assert_eq!(
-            values(&collection_candidates(&inv, "x", at(0))),
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            values(&field_candidates(&inv, "age:", at(0))),
-            Vec::<String>::new()
+            values(&field_candidates(&inv, FieldKind::OrderBy, "d", at(0))),
+            none()
         );
     }
 
@@ -1028,8 +1243,64 @@ mod tests {
     fn literal_candidates_need_no_database() {
         let inv = Invocation::new(&words("fsq query users"), &no_env);
         assert_eq!(
-            values(&field_candidates(&inv, "age:", at(0))),
+            values(&field_candidates(&inv, FieldKind::OrderBy, "age:", at(0))),
             ["age:asc", "age:desc"]
         );
+    }
+
+    /// An invocation of `query users` on project `p` whose cache, under `dir`, holds `fields`.
+    fn seeded(dir: &Path, fields: &[&str], emulator: Option<&str>) -> Invocation {
+        let env = |name: &str| match name {
+            "XDG_CACHE_HOME" => Some(dir.display().to_string()),
+            "FIRESTORE_EMULATOR_HOST" => emulator.map(str::to_owned),
+            _ => None,
+        };
+        let inv = Invocation::new(&words("fsq --project p query users"), &env);
+        let scope = inv.scope.clone().unwrap();
+        inv.cache()
+            .unwrap()
+            .write(&fields_cache_name(&scope), at(100), &found(fields));
+        inv
+    }
+
+    #[test]
+    fn cached_fields_are_filtered_by_what_was_typed() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = seeded(
+            dir.path(),
+            &["address", "address.city", "name", "`my-field`"],
+            None,
+        );
+        let candidates = |kind, typed| values(&field_candidates(&inv, kind, typed, at(200)));
+        assert_eq!(
+            candidates(FieldKind::Single, ""),
+            ["address", "address.city", "name", "`my-field`"]
+        );
+        assert_eq!(
+            candidates(FieldKind::Single, "addr"),
+            ["address", "address.city"]
+        );
+        assert_eq!(candidates(FieldKind::Single, "address.c"), ["address.city"]);
+        assert_eq!(
+            candidates(FieldKind::Select, "name,ad"),
+            ["name,address", "name,address.city"]
+        );
+        assert_eq!(candidates(FieldKind::Where, "zzz"), none());
+        // The unquoted spelling finds a quoted name, and the candidate is the quoted one.
+        assert_eq!(candidates(FieldKind::Single, "my"), ["`my-field`"]);
+        assert_eq!(candidates(FieldKind::Single, "`my"), ["`my-field`"]);
+    }
+
+    #[test]
+    fn emulator_data_is_cached_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = seeded(dir.path(), &["only_in_emulator"], Some("localhost:8080"));
+        let candidates =
+            |inv: &Invocation| values(&field_candidates(inv, FieldKind::Single, "", at(200)));
+        assert_eq!(candidates(&inv), ["only_in_emulator"]);
+        let env = |name: &str| (name == "XDG_CACHE_HOME").then(|| dir.path().display().to_string());
+        let production = Invocation::new(&words("fsq --project p query users"), &env);
+        // Not the emulator's answer; a lookup is made (and fails here: nothing listens).
+        assert_ne!(candidates(&production), ["only_in_emulator"]);
     }
 }
