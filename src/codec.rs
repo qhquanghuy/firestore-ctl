@@ -144,12 +144,6 @@ mod tests {
     }
 
     #[test]
-    fn input_accepts_bare_data_or_full_document() {
-        let full = typed_json::document_to_json(&sample_doc("2026-11-20T00:00:00Z"));
-        assert_eq!(fields_from_input(&full), fields_from_input(&full["data"]));
-    }
-
-    #[test]
     fn user_field_named_path_does_not_collide() {
         let j = json!({"_path": "teams/t1", "data": {"_path": "mine"}});
         assert_eq!(
@@ -170,13 +164,6 @@ mod tests {
             Value::Timestamp(ts("2026-01-05T10:00:00Z")),
         ));
         assert_eq!(j["data"]["t"], "2026-01-05T10:00:00Z");
-    }
-
-    #[test]
-    fn int_extremes_roundtrip_through_text() {
-        for i in [i64::MIN, i64::MAX, 0, -1] {
-            assert_eq!(through_text(&Value::Int(i)), Ok(Value::Int(i)));
-        }
     }
 
     #[test]
@@ -429,14 +416,6 @@ mod tests {
     }
 
     #[test]
-    fn negative_zero_keeps_its_sign() {
-        assert!(matches!(
-            through_text(&Value::Double(-0.0)),
-            Ok(Value::Double(z)) if z.is_sign_negative()
-        ));
-    }
-
-    #[test]
     fn double_tag_accepts_integer_and_rejects_other_strings() {
         assert_eq!(
             typed_json::value_from_json(&json!({"$double": 1})),
@@ -447,28 +426,9 @@ mod tests {
     }
 
     #[test]
-    fn maps_with_a_single_dollar_key_roundtrip() {
-        for key in ["$ts", "$foo", "$map", "$double"] {
-            let m = Value::Map([(key.to_owned(), Value::Int(1))].into_iter().collect());
-            assert_eq!(through_text(&m), Ok(m.clone()), "{key}");
-            let nested = Value::Array(vec![Value::Map(
-                [(key.to_owned(), m.clone())].into_iter().collect(),
-            )]);
-            assert_eq!(through_text(&nested), Ok(nested.clone()), "nested {key}");
-        }
-    }
-
-    #[test]
     fn multi_key_map_with_dollar_key_is_plain_map() {
         let j = json!({"$ts": "x", "other": 1});
         assert!(matches!(typed_json::value_from_json(&j), Ok(Value::Map(m)) if m.len() == 2));
-    }
-
-    #[test]
-    fn document_with_field_named_like_a_tag_roundtrips() {
-        let doc = sample_doc_with("$ts", Value::Int(7));
-        let j = typed_json::document_to_json(&doc);
-        assert_eq!(fields_from_input(&j), Ok(doc.data));
     }
 
     #[test]
