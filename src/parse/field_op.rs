@@ -1,12 +1,10 @@
 use std::str::FromStr;
 
 use super::{ParseError, parse_field, parse_token, split_around, unquoted};
-use crate::domain::{FieldOp, Value};
+use crate::domain::{FieldOp, FieldPath, Value};
 
 const FIELD_HINT: &str =
     "for a comparison use `==` in --where; backtick-quote unusual field names, e.g. `my-field`";
-
-const BRACE_HINT: &str = r#"a value starting with `{` is not a map; to store it as text quote it, e.g. a="{\"x\":1}"; to write a map use firectl set <doc> --merge --data '{"a":{"x":1}}'"#;
 
 impl FromStr for FieldOp {
     type Err = ParseError;
@@ -19,7 +17,7 @@ impl FromStr for FieldOp {
             .ok_or_else(|| {
                 fail("expected `field=value`, `field+=value` or `field-=value`".to_owned())
             })?;
-        let field = |text: &str| parse_field(text, FIELD_HINT).map_err(fail);
+        let field_of = |text: &str| parse_field(text, FIELD_HINT).map_err(fail);
         let text = text.trim();
         if text.starts_with('=') {
             return Err(ParseError::new(
@@ -27,18 +25,47 @@ impl FromStr for FieldOp {
                 "value starts with `=`; for a comparison use `==` in --where (quote the value to set it literally)",
             ));
         }
+        let before = before.trim_end();
+        let (name, op) = if let Some(name) = before.strip_suffix('+') {
+            (name, Kind::Union)
+        } else if let Some(name) = before.strip_suffix('-') {
+            (name, Kind::Remove)
+        } else {
+            (before, Kind::Set)
+        };
+        let field = field_of(name)?;
         if text.starts_with('{') {
-            return Err(ParseError::new(s, BRACE_HINT));
+            return Err(ParseError::new(s, brace_hint(&field, op)));
         }
         let value = parse_token(text).map_err(|e| ParseError::new(s, e.reason))?;
-        let before = before.trim_end();
-        if let Some(name) = before.strip_suffix('+') {
-            Ok(Self::ArrayUnion(field(name)?, elements(s, text, value)?))
-        } else if let Some(name) = before.strip_suffix('-') {
-            Ok(Self::ArrayRemove(field(name)?, elements(s, text, value)?))
-        } else {
-            Ok(Self::Set(field(before)?, value))
-        }
+        Ok(match op {
+            Kind::Union => Self::ArrayUnion(field, elements(s, text, value)?),
+            Kind::Remove => Self::ArrayRemove(field, elements(s, text, value)?),
+            Kind::Set => Self::Set(field, value),
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Set,
+    Union,
+    Remove,
+}
+
+// Examples are shell-quoted around the whole op: the shell would strip bare double quotes.
+fn brace_hint(field: &FieldPath, kind: Kind) -> String {
+    match kind {
+        Kind::Set => format!(
+            "--set cannot write a map; set nested fields one by one (--set '{field}.x=1'), \
+             or quote the whole op to store text: --set '{field}=\"{{...}}\"'"
+        ),
+        Kind::Union => format!(
+            "array elements cannot be maps; quote the whole op to store text: --set '{field}+=\"{{...}}\"'"
+        ),
+        Kind::Remove => format!(
+            "array elements cannot be maps; quote the whole op to store text: --set '{field}-=\"{{...}}\"'"
+        ),
     }
 }
 
@@ -180,16 +207,22 @@ mod tests {
     }
 
     #[test]
-    fn an_unquoted_value_starting_with_a_brace_is_rejected_with_both_ways_out() {
-        for bad in [r#"a={"x":1}"#, "a+={", "a-={x}", "a = {}"] {
-            let e = bad.parse::<FieldOp>().unwrap_err();
-            assert!(e.reason.contains(r#"a="{\"x\":1}""#), "{bad}: {e}");
-            assert!(
-                e.reason
-                    .contains(r#"firectl set <doc> --merge --data '{"a":{"x":1}}'"#),
-                "{bad}: {e}"
-            );
+    fn an_unquoted_value_starting_with_a_brace_is_rejected_with_a_hint_for_the_real_field() {
+        let reason = |s: &str| s.parse::<FieldOp>().unwrap_err().reason;
+        for bad in [r#"a.b={"x":1}"#, "a.b = {}"] {
+            let r = reason(bad);
+            assert!(r.contains("--set 'a.b.x=1'"), "{bad}: {r}");
+            assert!(r.contains(r#"--set 'a.b="{...}"'"#), "{bad}: {r}");
         }
+        for (bad, op) in [("tags+={", "+="), ("tags-={x}", "-=")] {
+            let r = reason(bad);
+            assert!(
+                r.contains(&format!(r#"--set 'tags{op}"{{...}}"'"#)),
+                "{bad}: {r}"
+            );
+            assert!(!r.contains("nested"), "{bad}: {r}");
+        }
+        assert!(!reason("a={}").contains("--merge"));
     }
 
     #[test]

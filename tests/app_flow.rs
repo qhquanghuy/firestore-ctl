@@ -277,6 +277,31 @@ async fn merging_a_select_projection_changes_only_the_selected_fields() {
         ])
     );
 }
+
+#[tokio::test]
+async fn merging_a_select_projection_is_guarded_by_its_update_time() {
+    let fs = FakeFirestore::with(doc("users/u1"));
+    let cli = Cli::try_parse_from([
+        "firectl",
+        "--project",
+        "p",
+        "set",
+        "users/u1",
+        "--merge",
+        "--data",
+        r#"{"_updateTime":"2025-12-31T00:00:00Z","_select":["a"],"data":{"a":1}}"#,
+    ])
+    .unwrap();
+    let req = cli.into_request(std::io::empty()).unwrap();
+    let r = exec(&ctx_writable(), &fs, req).await;
+    assert_eq!(
+        r,
+        gateway(GatewayError::PreconditionFailed(path("users/u1")))
+    );
+    assert_eq!(exit_code_value(&r.unwrap_err()), 5);
+    assert_eq!(fs.stored(&path("users/u1")), Some(doc("users/u1")));
+}
+
 #[tokio::test]
 async fn update_applies_field_ops() {
     let fs = FakeFirestore::with(doc("users/u1"));

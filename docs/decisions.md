@@ -71,8 +71,10 @@ Terms: see `glossary.md`.
   - Bare tokens are typed: numbers, `true`/`false`, `null`.
   - Leading zeros and a leading `+` stay strings.
   - An unquoted `--set` value starting with `{` is a usage error, not a string: it is almost always a
-    map written by accident. Quote it to store text, or use `set --merge --data` for a map. Filters
-    keep the string reading (`--where 'payload == {"x":1}'`), since users query JSON-encoded string fields.
+    map written by accident, and `--set` cannot write a map. The error says to set nested fields one by one
+    or to quote the whole op to store text; it names no other write command (`set --merge` deep-merges,
+    creates a missing document, and replaces an array). Filters keep the string reading
+    (`--where 'payload == {"x":1}'`), since users query JSON-encoded string fields.
   - Field names with spaces or operator characters need backticks, so `createdAt desc` can't silently
     become a field name.
 

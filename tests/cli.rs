@@ -731,3 +731,39 @@ fn without_the_command_line_only_plain_candidates_are_offered() {
         ["name", "'`my-field`'", "'a b'"]
     );
 }
+
+#[test]
+fn an_unquoted_brace_set_value_is_a_usage_error_naming_the_field() {
+    firectl()
+        .args([
+            "--project",
+            "p",
+            "update",
+            "users/u1",
+            "--set",
+            r#"profile={"x":1}"#,
+        ])
+        .assert()
+        .code(2)
+        .stderr(contains("profile.x=1").and(contains("--merge").not()));
+}
+
+#[test]
+fn the_suggested_quoted_form_passes_the_shell_and_the_parser() {
+    // Not writable, so it stops at the write guard (exit 6), after parsing.
+    let mut cmd = std::process::Command::new("sh");
+    let out = cmd
+        .args([
+            "-c",
+            r#"exec "$0" --project p update users/u1 --set 'a="{\"x\":1}"'"#,
+        ])
+        .arg(assert_cmd::cargo::cargo_bin("firectl"))
+        .env("FIRESTORE_EMULATOR_HOST", "127.0.0.1:1")
+        .env("XDG_CACHE_HOME", "/dev/null/firectl-test-cache")
+        .env_remove("FIRECTL_WRITABLE")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(6), "{stderr}");
+    assert!(!stderr.contains("map"), "{stderr}");
+}

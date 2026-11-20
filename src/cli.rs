@@ -34,8 +34,9 @@ const LONG_HELP: &str = r#"Values (--where, --set, lists):
   [a, "b c", 3]         list, for `in`, `not-in`, `array-contains-any`, `+=`, `-=`
   anything else         a string. Numbers with leading zeros (007, 0123) stay strings;
                         quote a value to force a string ("18", "true", "null").
-  A --set value starting with { is rejected: quote it to store text, or use
-  `set --merge --data` to write a map. (--where compares it as a string.)
+  A --set value starting with { is rejected (--set cannot write a map): set nested
+  fields one by one, or quote the whole op to store text: --set 'a="{...}"'
+  (--where compares it as a string).
   A whole filter is one shell argument:  --where 'name == "John Smith"'
   Operators: == != < <= > >= in not-in array-contains array-contains-any
 
@@ -396,8 +397,8 @@ pub enum Cmd {
         /// `f=v` sets a field; `f+=v` ARRAY-UNION (adds v to an array); `f-=v` ARRAY-REMOVE
         /// (removes v from an array); not numeric increments. Repeat for several changes.
         /// Values: 18, 1.5, true, null, ts:..., ref:..., "text", [a, b]. Backtick field
-        /// names with spaces or punctuation: `my-field`=1. A value starting with `{` must be
-        /// quoted (it is not a map; use `set --merge --data` for maps).
+        /// names with spaces or punctuation: `my-field`=1. A value starting with `{` is
+        /// rejected: `--set` cannot write a map.
         #[arg(
             long = "set",
             value_name = "OP",
@@ -495,11 +496,11 @@ struct SetData {
     read_at: Option<UpdateTime>,
 }
 
+const PLAIN_REFUSED: &str = "plain output cannot be written back; use typed output (omit --plain)";
+
 fn check_markers(envelope: &Envelope, merge: bool) -> Result<(), AppError> {
     if envelope.plain {
-        Err(AppError::Input(
-            "plain output cannot be written back; use typed output (omit --plain)".to_owned(),
-        ))
+        Err(AppError::Input(PLAIN_REFUSED.to_owned()))
     } else if envelope.select.is_some() && !merge {
         Err(AppError::Input(
             "--data is a `query --select` projection holding only the selected fields; \
@@ -516,8 +517,14 @@ fn check_markers(envelope: &Envelope, merge: bool) -> Result<(), AppError> {
 fn decode_data(text: &str, target: &DocPath, merge: bool) -> Result<SetData, AppError> {
     let json: Json = serde_json::from_str(text)
         .map_err(|e| AppError::Input(format!("--data is not valid JSON: {e}")))?;
-    let Input { fields, envelope } =
-        typed_json::parse_input(&json).map_err(|e| AppError::Input(format!("--data {e}")))?;
+    // The marker is the real reason, so it outranks a shape error the same input also has.
+    let Input { fields, envelope } = typed_json::parse_input(&json).map_err(|e| {
+        if json.get("_plain").is_some() {
+            AppError::Input(PLAIN_REFUSED.to_owned())
+        } else {
+            AppError::Input(format!("--data {e}"))
+        }
+    })?;
     let Some(envelope) = envelope else {
         return Ok(SetData {
             fields,
@@ -1146,7 +1153,7 @@ mod tests {
             (
                 "K",
                 r#"{"_plain":true,"a":1}"#.to_owned(),
-                reject("inside `data`"),
+                reject("plain output"),
             ),
             (
                 "L",

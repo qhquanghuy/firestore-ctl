@@ -126,7 +126,9 @@ firectl completions zsh                          # prints the line to add to you
 In `--where`, `--set` and lists: `null`, `true`, `false`, numbers (`18`, `-3`, `1.5`),
 `"quoted text"` (escapes `\"` and `\\` only), `ts:2026-01-05T10:00:00Z`,
 `ref:users/u1`, lists `[a, "b c", 3]`. Anything else is a string; numbers with leading
-zeros (`007`) stay strings; quote a value to force a string (`"18"`).
+zeros (`007`) stay strings; quote a value to force a string (`"18"`). The one exception is
+`--set`: an unquoted value starting with `{` is a usage error (exit 2), because `--set`
+cannot write a map; see below.
 
 Dots separate nested fields (`address.city`). A name with spaces or punctuation is
 wrapped in backticks: `` `my-field` ``, `` `a b`.c ``.
@@ -137,6 +139,10 @@ wrapped in backticks: `` `my-field` ``, `` `a b`.c ``.
 union** and **array remove**, not numeric increment or decrement. `+=` adds the value (or
 each element of a list) if absent; `-=` removes every occurrence. Each field may be changed
 once per update.
+
+`--set` cannot write a map, so an unquoted value starting with `{` is rejected (exit 2). Set
+nested fields one by one (`--set 'profile.x=1'`), or quote the whole op to store the text
+(`--set 'note="{\"x\":1}"'`). `--where` still compares such a value as a string.
 
 If the field is not an array (or is missing), `+=` and `-=` do not fail: they replace it with
 an array holding the given values (`-=` leaves an empty array). Check the field first when
