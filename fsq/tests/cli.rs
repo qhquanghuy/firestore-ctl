@@ -399,7 +399,15 @@ fn subcommand_help_is_self_sufficient() {
             .and(contains("ARRAY-REMOVE"))
             .and(contains("fsq --help")),
     );
-    for sub in ["get", "count", "collections", "indexes", "set", "delete"] {
+    for sub in [
+        "get",
+        "count",
+        "collections",
+        "indexes",
+        "set",
+        "delete",
+        "completions",
+    ] {
         fsq()
             .args([sub, "--help"])
             .assert()

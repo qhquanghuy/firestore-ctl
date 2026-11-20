@@ -12,7 +12,6 @@ use fsq::domain::DbTarget;
 use fsq::exit::exit_code;
 use fsq::grpc;
 use fsq::policy::{PolicyError, WritePolicy};
-use fsq::port::GatewayError;
 use fsq::render::{render, render_error};
 
 /// Prints `e` to stderr and returns its exit code.
@@ -29,7 +28,7 @@ fn effective_policy(
 ) -> Result<WritePolicy, AppError> {
     match (parsed, is_write) {
         (Ok(policy), _) => Ok(policy),
-        (Err(e), true) => Err(AppError::Gateway(GatewayError::Other(e.to_string()))),
+        (Err(e), true) => Err(AppError::Policy(e)),
         (Err(_), false) => Ok(WritePolicy::default()),
     }
 }

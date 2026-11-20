@@ -6,7 +6,7 @@ use crate::domain::{
     AggregateQuery, CollectionId, DbTarget, DocPath, Document, IndexAdvice, Query, Write,
     required_index,
 };
-use crate::policy::{WriteAccess, WriteDenied, WritePolicy};
+use crate::policy::{PolicyError, WriteAccess, WriteDenied, WritePolicy};
 use crate::port::{AggregateResult, Firestore, GatewayError, IndexInfo, Written};
 
 /// What the user asked for.
@@ -65,6 +65,9 @@ pub enum AppError {
     /// The target database is not writable.
     #[error(transparent)]
     WritesDisabled(WriteDenied),
+    /// The write policy (`FSQ_WRITABLE`) is malformed, so no write can be authorized.
+    #[error(transparent)]
+    Policy(#[from] PolicyError),
     /// A requested document does not exist.
     #[error("document not found: {0}")]
     NotFound(DocPath),

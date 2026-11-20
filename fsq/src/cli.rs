@@ -408,6 +408,7 @@ pub enum Cmd {
         if_unchanged_since: Option<UpdateTime>,
     },
     /// Print a shell completion script.
+    #[command(after_long_help = SEE_ROOT_HELP)]
     Completions {
         /// The shell to generate for.
         shell: Shell,
@@ -418,10 +419,15 @@ impl Cmd {
     /// Whether the command changes data (and so needs write authorization).
     #[must_use]
     pub fn is_write(&self) -> bool {
-        matches!(
-            self,
-            Self::Set { .. } | Self::Update { .. } | Self::Delete { .. }
-        )
+        match self {
+            Self::Set { .. } | Self::Update { .. } | Self::Delete { .. } => true,
+            Self::Get { .. }
+            | Self::Query { .. }
+            | Self::Count { .. }
+            | Self::Collections { .. }
+            | Self::Indexes { .. }
+            | Self::Completions { .. } => false,
+        }
     }
 }
 

@@ -12,7 +12,7 @@ use fsq::domain::{
     SetMode, UpdateDoc, UpdateTime, Value, Write,
 };
 use fsq::exit::{exit_code, exit_code_value};
-use fsq::policy::{WriteDenied, WritePolicy};
+use fsq::policy::{PolicyError, WriteDenied, WritePolicy};
 use fsq::port::{GatewayError, Written};
 use support::fake::{FakeFirestore, default_target};
 
@@ -437,6 +437,10 @@ fn exit_codes() {
     );
     assert_eq!(gw(GatewayError::Other("x".into())), 1);
     assert_eq!(exit_code_value(&AppError::Input("x".into())), 2);
+    assert_eq!(
+        exit_code_value(&AppError::Policy(PolicyError::Wildcard("*".into()))),
+        1
+    );
 }
 
 #[test]
