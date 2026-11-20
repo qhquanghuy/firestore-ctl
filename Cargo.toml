@@ -110,5 +110,15 @@ unused_trait_names = "deny"
 mod_module_files = "deny"
 
 [profile.release]
-lto = "thin"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
 strip = true
+overflow-checks = true
+# panic stays "unwind": completion relies on catch_unwind to stay silent.
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

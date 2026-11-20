@@ -131,6 +131,10 @@ Terms: see `glossary.md`.
     over `#[allow]`, no wildcard enum arms, no panicking index or slice, `unreachable_pub`, and more.
   - The toolchain is pinned by `flake.lock`, so new lints arrive only on a deliberate update.
   - `CLAUDE.md` holds only what tooling can't check, plus tips for writing code that compiles first time.
+- **Release builds trade build time for speed and size; dev builds for compile speed.** Release:
+  `opt-level=3`, fat LTO, `codegen-units=1`, stripped, `overflow-checks` kept on (same overflow behaviour
+  as the tests). `panic` stays `unwind`, because completion relies on `catch_unwind`. Dev: line tables
+  only, no debuginfo for dependencies. Result: 12.9 MB → 9.4 MB binary.
 - **One trait, `Firestore` (the port), because it has two implementations** (gRPC, in-memory fake).
   Everything else is concrete types and free functions.
 - **Types carry meaning.** Newtypes, parse-don't-validate, illegal states unrepresentable. Names don't
