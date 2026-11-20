@@ -53,12 +53,7 @@
             }
           );
           fmt = craneLib.cargoFmt { inherit src; };
-          nextest = craneLib.cargoNextest (
-            checkArgs
-            // {
-              cargoNextestExtraArgs = "--no-tests=pass";
-            }
-          );
+          nextest = craneLib.cargoNextest checkArgs;
         };
 
         devShells.default = pkgs.mkShell {

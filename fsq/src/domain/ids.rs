@@ -1,0 +1,213 @@
+//! Identifier newtypes. Parsed once at the edge; always valid afterwards.
+
+use std::fmt;
+use std::str::FromStr;
+
+use thiserror::Error;
+
+/// Why a string is not a valid identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Error)]
+pub enum IdError {
+    /// The identifier was the empty string.
+    #[error("{kind} must not be empty")]
+    Empty {
+        /// What was being parsed (e.g. "project id").
+        kind: &'static str,
+    },
+    /// The identifier was non-empty but broke the format rule.
+    #[error("invalid {kind} `{input}`: {expected}")]
+    Invalid {
+        /// What was being parsed (e.g. "project id").
+        kind: &'static str,
+        /// The rejected text.
+        input: String,
+        /// The rule the text broke.
+        expected: &'static str,
+    },
+}
+
+fn parse_id(
+    input: &str,
+    kind: &'static str,
+    expected: &'static str,
+    is_valid: fn(&str) -> bool,
+) -> Result<String, IdError> {
+    if input.is_empty() {
+        Err(IdError::Empty { kind })
+    } else if is_valid(input) {
+        Ok(input.to_owned())
+    } else {
+        Err(IdError::Invalid {
+            kind,
+            input: input.to_owned(),
+            expected,
+        })
+    }
+}
+
+fn is_lowercase_slug(s: &str) -> bool {
+    s.chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+fn is_database_id(s: &str) -> bool {
+    s == DEFAULT_DATABASE || is_lowercase_slug(s)
+}
+
+fn is_segment(s: &str) -> bool {
+    !s.contains('/')
+}
+
+const DEFAULT_DATABASE: &str = "(default)";
+
+macro_rules! id_newtype {
+    ($(#[$doc:meta])* $name:ident, $kind:literal, $expected:literal, $is_valid:path) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub struct $name(String);
+
+        impl $name {
+            /// The identifier as written.
+            #[must_use]
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = IdError;
+
+            fn from_str(s: &str) -> Result<Self, IdError> {
+                parse_id(s, $kind, $expected, $is_valid).map(Self)
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+    };
+}
+
+id_newtype!(
+    /// A Google Cloud project id (`[a-z0-9-]+`).
+    ProjectId,
+    "project id",
+    "expected lowercase letters, digits and hyphens",
+    is_lowercase_slug
+);
+
+id_newtype!(
+    /// A Firestore database id: `(default)` or lowercase letters, digits and hyphens.
+    DatabaseId,
+    "database id",
+    "expected `(default)` or lowercase letters, digits and hyphens",
+    is_database_id
+);
+
+id_newtype!(
+    /// A collection name: one non-empty path segment.
+    CollectionId,
+    "collection id",
+    "must not contain `/`",
+    is_segment
+);
+
+id_newtype!(
+    /// A document name: one non-empty path segment.
+    DocId,
+    "document id",
+    "must not contain `/`",
+    is_segment
+);
+
+impl Default for DatabaseId {
+    /// The `(default)` database.
+    fn default() -> Self {
+        Self(DEFAULT_DATABASE.to_owned())
+    }
+}
+
+/// A fully resolved Firestore database: which project and which database in it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DbTarget {
+    /// The Google Cloud project.
+    pub project: ProjectId,
+    /// The database within the project.
+    pub database: DatabaseId,
+}
+
+impl DbTarget {
+    /// Resource name of the database: `projects/P/databases/D`.
+    #[must_use]
+    pub fn database_path(&self) -> String {
+        format!("projects/{}/databases/{}", self.project, self.database)
+    }
+
+    /// Resource name of the documents root: `projects/P/databases/D/documents`.
+    #[must_use]
+    pub fn documents_root(&self) -> String {
+        format!("{}/documents", self.database_path())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn database_path_uses_named_db() {
+        let t = DbTarget {
+            project: "p".parse().unwrap(),
+            database: "jobs-db".parse().unwrap(),
+        };
+        assert_eq!(t.database_path(), "projects/p/databases/jobs-db");
+        assert_eq!(
+            t.documents_root(),
+            "projects/p/databases/jobs-db/documents"
+        );
+    }
+
+    #[test]
+    fn default_database_is_parenthesised_default() {
+        assert_eq!(DatabaseId::default().as_str(), "(default)");
+        assert_eq!("(default)".parse::<DatabaseId>(), Ok(DatabaseId::default()));
+    }
+
+    #[test]
+    fn project_and_database_ids_reject_bad_input() {
+        assert_eq!(
+            "".parse::<ProjectId>(),
+            Err(IdError::Empty { kind: "project id" })
+        );
+        assert!(matches!(
+            "My_Proj".parse::<ProjectId>(),
+            Err(IdError::Invalid { .. })
+        ));
+        assert!(matches!(
+            "a/b".parse::<DatabaseId>(),
+            Err(IdError::Invalid { .. })
+        ));
+        assert!(matches!(
+            "(other)".parse::<DatabaseId>(),
+            Err(IdError::Invalid { .. })
+        ));
+        assert!("my-proj-123".parse::<ProjectId>().is_ok());
+    }
+
+    #[test]
+    fn error_messages_mention_the_input() {
+        let msg = "Bad Proj".parse::<ProjectId>().unwrap_err().to_string();
+        assert!(msg.contains("Bad Proj"), "{msg}");
+    }
+
+    #[test]
+    fn collection_and_doc_ids_are_single_segments() {
+        assert!("users".parse::<CollectionId>().is_ok());
+        assert!("a b.c".parse::<DocId>().is_ok());
+        assert!("".parse::<DocId>().is_err());
+        assert!("a/b".parse::<CollectionId>().is_err());
+    }
+}

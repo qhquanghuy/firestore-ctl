@@ -1,1 +1,3 @@
 //! fsq
+
+pub mod domain;
