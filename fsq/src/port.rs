@@ -26,6 +26,15 @@ impl AggregateResult {
     }
 }
 
+/// What a successful write left behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Written {
+    /// The document now exists with this update time.
+    Updated(UpdateTime),
+    /// The document was deleted (a deletion has no update time).
+    Deleted,
+}
+
 /// How far along a composite index is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexState {
@@ -57,8 +66,9 @@ pub enum GatewayError {
     /// The document already exists.
     #[error("document already exists: {0}")]
     AlreadyExists(DocPath),
-    /// The document changed since the guarded `_updateTime`, or a guard needs it to exist.
-    #[error("precondition failed: {0} changed since the given time")]
+    /// A guarded write found the document missing or changed since the guarded
+    /// `_updateTime` (Firestore reports both the same way).
+    #[error("precondition failed: {0} is missing or changed since the given time")]
     PreconditionFailed(DocPath),
     /// The query needs an index that does not exist.
     #[error("the query requires an index that does not exist")]
@@ -66,6 +76,9 @@ pub enum GatewayError {
         /// Console link that creates the index, when the server provided one.
         console_url: Option<String>,
     },
+    /// Something other than a document was not found (e.g. the database itself).
+    #[error("not found: {0}")]
+    ResourceNotFound(String),
     /// Missing, expired or rejected credentials.
     #[error("authentication failed: {0}")]
     Auth(String),
@@ -76,8 +89,8 @@ pub enum GatewayError {
 
 /// Everything the program asks of Firestore. Implemented by the gRPC adapter and by
 /// the test fake; used only through generics (no `dyn`).
-// The program runs on a single-threaded runtime and never spawns these futures, so
-// the missing `Send` bounds the lint warns about are irrelevant.
+// The futures are awaited in place and never spawned, so the missing `Send` bounds the
+// lint warns about are irrelevant.
 #[allow(async_fn_in_trait)]
 pub trait Firestore {
     /// The document at `p`, or `None` if it does not exist.
@@ -98,10 +111,20 @@ pub trait Firestore {
     /// The composite indexes of collection group `c`.
     async fn list_indexes(&self, c: &CollectionId) -> Result<Vec<IndexInfo>, GatewayError>;
 
-    /// Applies `w` and returns the document's new update time.
+    /// Applies `w` atomically.
     ///
     /// The database written is `access.target()`: the grant names the database, so
     /// there is no separate target parameter that could disagree with it. An
     /// implementation connected to a different database must refuse the write.
-    async fn write(&self, w: &Write, access: &WriteAccess) -> Result<UpdateTime, GatewayError>;
+    ///
+    /// Preconditions every implementation enforces (Firestore cannot combine
+    /// `exists` with `update_time`, so a guard replaces the existence check):
+    /// - `Set` with `SetMode::Create`: the document must not exist, else
+    ///   [`GatewayError::AlreadyExists`].
+    /// - `Set` with `Overwrite` or `Merge` and `Guard::None`: no precondition (upsert).
+    /// - `Update` or `Delete` with `Guard::None`: the document must exist, else
+    ///   [`GatewayError::NotFound`].
+    /// - Any write with `Guard::UnchangedSince(t)`: the document must exist with update
+    ///   time `t`, else [`GatewayError::PreconditionFailed`] (missing or changed).
+    async fn write(&self, w: &Write, access: &WriteAccess) -> Result<Written, GatewayError>;
 }

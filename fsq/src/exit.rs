@@ -18,7 +18,8 @@ pub fn exit_code(e: &AppError) -> ExitCode {
 pub fn exit_code_value(e: &AppError) -> u8 {
     match e {
         AppError::Input(_) => 2,
-        AppError::NotFound(_) | AppError::Gateway(GatewayError::NotFound(_)) => 3,
+        AppError::NotFound(_)
+        | AppError::Gateway(GatewayError::NotFound(_) | GatewayError::ResourceNotFound(_)) => 3,
         AppError::Gateway(GatewayError::AlreadyExists(_)) => 4,
         AppError::Gateway(GatewayError::PreconditionFailed(_)) => 5,
         AppError::WritesDisabled(_) => 6,

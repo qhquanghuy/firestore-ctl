@@ -3,11 +3,11 @@
 use thiserror::Error;
 
 use crate::domain::{
-    AggregateQuery, CollectionId, DbTarget, DocPath, Document, IndexAdvice, Query, UpdateTime,
-    Write, required_index,
+    AggregateQuery, CollectionId, DbTarget, DocPath, Document, IndexAdvice, Query, Write,
+    required_index,
 };
 use crate::policy::{WriteAccess, WriteDenied, WritePolicy};
-use crate::port::{AggregateResult, Firestore, GatewayError, IndexInfo};
+use crate::port::{AggregateResult, Firestore, GatewayError, IndexInfo, Written};
 
 /// What the user asked for.
 #[derive(Debug, Clone, PartialEq)]
@@ -43,8 +43,8 @@ pub enum Output {
     Written {
         /// The document written.
         path: DocPath,
-        /// Its update time after the write.
-        update_time: UpdateTime,
+        /// What the write left behind.
+        result: Written,
     },
 }
 
@@ -82,71 +82,87 @@ pub struct Context {
     pub policy: WritePolicy,
 }
 
-/// Authorizes writes *before* touching the gateway; returns a value, never prints.
+/// A [`Request`] cleared to run, obtained only from [`authorize`]. A write carries the
+/// [`WriteAccess`] granted for it, so [`run`] cannot be handed an unauthorized write
+/// and holds no policy of its own.
+#[derive(Debug)]
+pub struct Authorized(Cleared);
+
+/// [`Request`] with the grant attached to its write: no write without access.
+#[derive(Debug)]
+enum Cleared {
+    Get(DocPath),
+    Query(Query),
+    Aggregate(AggregateQuery),
+    Collections(Option<DocPath>),
+    Indexes(CollectionId),
+    Write(Write, WriteAccess),
+}
+
+/// Checks `req` against the write policy; main.rs calls this before connecting.
+/// Writes get a grant for the context's database, reads need none.
 ///
 /// # Errors
-/// [`AppError::WritesDisabled`] for a write to a read-only database; otherwise the
-/// failure of the Firestore call ([`AppError::NotFound`] for `get` of a missing
-/// document, [`AppError::MissingIndex`] for a query lacking an index).
-pub async fn run<F: Firestore>(ctx: &Context, fs: &F, req: Request) -> Result<Output, AppError> {
+/// [`AppError::WritesDisabled`] if `req` is a write and the target is not writable.
+pub fn authorize(ctx: &Context, req: Request) -> Result<Authorized, AppError> {
     match req {
-        // Authorized here as well as in `preflight` (which main calls before
-        // connecting): no write path may reach the gateway without a grant.
-        Request::Write(w) => {
-            let access = authorize_write(ctx)?;
-            fs.write(&w, &access)
-                .await
-                .map(|update_time| Output::Written {
-                    path: w.path().clone(),
-                    update_time,
-                })
-                .map_err(AppError::Gateway)
-        }
-        Request::Get(p) => fs
+        Request::Write(w) => ctx
+            .policy
+            .authorize(&ctx.target)
+            .map(|access| Cleared::Write(w, access))
+            .map_err(AppError::WritesDisabled),
+        Request::Get(p) => Ok(Cleared::Get(p)),
+        Request::Query(q) => Ok(Cleared::Query(q)),
+        Request::Aggregate(a) => Ok(Cleared::Aggregate(a)),
+        Request::Collections(parent) => Ok(Cleared::Collections(parent)),
+        Request::Indexes(c) => Ok(Cleared::Indexes(c)),
+    }
+    .map(Authorized)
+}
+
+/// Executes an authorized request against Firestore; returns a value, never prints.
+///
+/// # Errors
+/// The failure of the Firestore call: [`AppError::NotFound`] for `get` of a missing
+/// document, [`AppError::MissingIndex`] for a query lacking an index, otherwise
+/// [`AppError::Gateway`].
+pub async fn run<F: Firestore>(fs: &F, req: Authorized) -> Result<Output, AppError> {
+    match req.0 {
+        Cleared::Write(w, access) => fs
+            .write(&w, &access)
+            .await
+            .map(|result| Output::Written {
+                path: w.path().clone(),
+                result,
+            })
+            .map_err(AppError::Gateway),
+        Cleared::Get(p) => fs
             .get(&p)
             .await
             .map_err(AppError::Gateway)?
             .map(Output::Document)
             .ok_or(AppError::NotFound(p)),
-        Request::Query(q) => fs
+        Cleared::Query(q) => fs
             .query(&q)
             .await
             .map(Output::Documents)
             .map_err(|e| index_error(e, &q)),
-        Request::Aggregate(a) => fs
+        Cleared::Aggregate(a) => fs
             .aggregate(&a)
             .await
             .map(Output::Aggregate)
             .map_err(|e| index_error(e, &a.query)),
-        Request::Collections(parent) => fs
+        Cleared::Collections(parent) => fs
             .list_collections(parent.as_ref())
             .await
             .map(Output::Collections)
             .map_err(AppError::Gateway),
-        Request::Indexes(c) => fs
+        Cleared::Indexes(c) => fs
             .list_indexes(&c)
             .await
             .map(Output::Indexes)
             .map_err(AppError::Gateway),
     }
-}
-
-/// Writes are authorized before any connection is opened; main.rs calls this first.
-/// Returns the grant for a write and `None` for reads.
-///
-/// # Errors
-/// [`AppError::WritesDisabled`] if `req` is a write and the target is not writable.
-pub fn preflight(ctx: &Context, req: &Request) -> Result<Option<WriteAccess>, AppError> {
-    match req {
-        Request::Write(_) => authorize_write(ctx).map(Some),
-        _ => Ok(None),
-    }
-}
-
-fn authorize_write(ctx: &Context) -> Result<WriteAccess, AppError> {
-    ctx.policy
-        .authorize(&ctx.target)
-        .map_err(AppError::WritesDisabled)
 }
 
 /// Turns a gateway's missing-index failure into advice for the query `q`.

@@ -1,15 +1,17 @@
-//! An in-memory [`Firestore`] for flow tests. Honours `SetMode`/`Guard` semantics
-//! and evaluates `==` filters only; everything else is out of scope for the fake.
+//! An in-memory [`Firestore`] for flow tests. Follows the write contract documented on
+//! `Firestore::write` exactly. Models `==` filters on top-level fields, `limit` and
+//! `count`; anything else (order, offset, select, other operators, nested fields,
+//! sum/avg, nested-map merge) fails with `GatewayError::Other("fake: unsupported ...")`.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use fsq::domain::{
-    AggregateQuery, CollectionId, DbTarget, DocPath, Document, FieldOp, Fields, Guard, Op, Query,
-    Scope, SetMode, Timestamp, UpdateTime, Value, Write,
+    AggregateQuery, Aggregation, CollectionId, DbTarget, DocPath, Document, FieldOp, Fields, Guard,
+    Op, Query, Scope, SetMode, Timestamp, UpdateTime, Value, Write,
 };
 use fsq::policy::WriteAccess;
-use fsq::port::{AggregateResult, Firestore, GatewayError, IndexInfo};
+use fsq::port::{AggregateResult, Firestore, GatewayError, IndexInfo, Written};
 
 /// The database the fake pretends to be connected to unless told otherwise.
 pub fn default_target() -> DbTarget {
@@ -82,12 +84,25 @@ impl FakeFirestore {
         UpdateTime::new(Timestamp::from_unix(seconds, 0).expect("in-range timestamp"))
     }
 
-    /// The documents matching `q`'s scope and `==` filters (no call recorded).
+    /// The documents matching `q`'s scope and `==` filters, up to its limit (no call
+    /// recorded). Anything the fake does not model is an error, never silently ignored.
     fn matching(&self, q: &Query) -> Result<Vec<Document>, GatewayError> {
+        let unsupported =
+            |what: &str| Err(GatewayError::Other(format!("fake: unsupported {what}")));
+        if !q.order.is_empty() {
+            return unsupported("order-by");
+        }
+        if q.offset > 0 {
+            return unsupported("offset");
+        }
+        if q.select.is_some() {
+            return unsupported("select");
+        }
         if q.filters.iter().any(|f| f.op() != Op::Eq) {
-            return Err(GatewayError::Other(
-                "fake: only == filters are supported".to_owned(),
-            ));
+            return unsupported("filter operator (only == is modelled)");
+        }
+        if q.filters.iter().any(|f| f.field().segments().len() != 1) {
+            return unsupported("nested field filter");
         }
         Ok(self
             .docs
@@ -95,11 +110,11 @@ impl FakeFirestore {
             .values()
             .filter(|d| in_scope(&q.scope, d))
             .filter(|d| {
-                q.filters.iter().all(|f| match f.field().segments() {
-                    [key] => d.data.get(key) == Some(f.value()),
-                    _ => false,
-                })
+                q.filters
+                    .iter()
+                    .all(|f| d.data.get(&f.field().segments()[0]) == Some(f.value()))
             })
+            .take(q.limit.map_or(usize::MAX, |l| l.get() as usize))
             .cloned()
             .collect())
     }
@@ -111,17 +126,52 @@ impl FakeFirestore {
     }
 }
 
-/// Fails with `PreconditionFailed` unless `guard` holds for the stored `existing`.
-fn check_guard(
+/// What a write requires of the stored document when it carries no `UnchangedSince`
+/// guard (Firestore cannot combine `exists` with `update_time`).
+#[derive(Clone, Copy)]
+enum Unguarded {
+    /// No precondition (upsert).
+    Anything,
+    /// `exists = false`: otherwise `AlreadyExists`.
+    MustBeAbsent,
+    /// `exists = true`: otherwise `NotFound`.
+    MustExist,
+}
+
+/// The write contract documented on [`Firestore::write`]: `UnchangedSince(t)` demands
+/// the document exists with update time `t` (`PreconditionFailed` otherwise); with
+/// [`Guard::None`] the write's own `unguarded` requirement applies.
+fn check_precondition(
     path: &DocPath,
     existing: Option<&Document>,
+    unguarded: Unguarded,
     guard: Guard,
 ) -> Result<(), GatewayError> {
-    match (guard, existing) {
-        (Guard::None, _) => Ok(()),
-        (Guard::UnchangedSince(t), Some(d)) if d.update_time == t => Ok(()),
-        (Guard::UnchangedSince(_), _) => Err(GatewayError::PreconditionFailed(path.clone())),
+    match (guard, unguarded, existing) {
+        (Guard::UnchangedSince(t), _, Some(d)) if d.update_time == t => Ok(()),
+        (Guard::UnchangedSince(_), _, _) => Err(GatewayError::PreconditionFailed(path.clone())),
+        (Guard::None, Unguarded::MustBeAbsent, Some(_)) => {
+            Err(GatewayError::AlreadyExists(path.clone()))
+        }
+        (Guard::None, Unguarded::MustExist, None) => Err(GatewayError::NotFound(path.clone())),
+        (Guard::None, _, _) => Ok(()),
     }
+}
+
+/// Top-level merge of `new` over the stored fields. Shallow: nested maps replace
+/// rather than merge, so the fake refuses them instead of diverging from Firestore.
+fn shallow_merge(existing: Option<Document>, new: &Fields) -> Result<Fields, GatewayError> {
+    if new.values().any(|v| matches!(v, Value::Map(_))) {
+        return Err(GatewayError::Other(
+            "fake: merging nested maps is not supported".to_owned(),
+        ));
+    }
+    Ok(existing
+        .map(|d| d.data)
+        .unwrap_or_default()
+        .into_iter()
+        .chain(new.clone())
+        .collect())
 }
 
 /// Applies one field change to a top-level field.
@@ -198,6 +248,11 @@ impl Firestore for FakeFirestore {
         if self.index_missing {
             return Err(Self::missing_index());
         }
+        if q.aggregations.iter().any(|a| *a != Aggregation::Count) {
+            return Err(GatewayError::Other(
+                "fake: unsupported aggregation (only count is modelled)".to_owned(),
+            ));
+        }
         let count = self.matching(&q.query)?.len();
         Ok(AggregateResult::new(
             q.aggregations
@@ -217,16 +272,16 @@ impl Firestore for FakeFirestore {
         parent: Option<&DocPath>,
     ) -> Result<Vec<CollectionId>, GatewayError> {
         self.record("list_collections");
-        let mut ids: Vec<CollectionId> = self
+        Ok(self
             .docs
             .borrow()
             .keys()
             .map(DocPath::collection)
             .filter(|c| c.parent() == parent)
             .map(|c| c.id().clone())
-            .collect();
-        ids.dedup();
-        Ok(ids)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect())
     }
 
     async fn list_indexes(&self, _c: &CollectionId) -> Result<Vec<IndexInfo>, GatewayError> {
@@ -234,7 +289,7 @@ impl Firestore for FakeFirestore {
         Ok(Vec::new())
     }
 
-    async fn write(&self, w: &Write, access: &WriteAccess) -> Result<UpdateTime, GatewayError> {
+    async fn write(&self, w: &Write, access: &WriteAccess) -> Result<Written, GatewayError> {
         self.record("write");
         if access.target() != &self.target {
             return Err(GatewayError::Other(format!(
@@ -247,58 +302,42 @@ impl Firestore for FakeFirestore {
         }
         let path = w.path();
         let existing = self.stored(path);
-        let time = self.tick();
         let new_data: Option<Fields> = match w {
             Write::Set(s) => {
-                match s.mode {
-                    SetMode::Create if existing.is_some() => {
-                        return Err(GatewayError::AlreadyExists(path.clone()));
-                    }
-                    SetMode::Create => {}
-                    SetMode::Overwrite(g) | SetMode::Merge(g) => {
-                        check_guard(path, existing.as_ref(), g)?;
-                    }
-                }
+                let (unguarded, guard) = match s.mode {
+                    SetMode::Create => (Unguarded::MustBeAbsent, Guard::None),
+                    SetMode::Overwrite(g) | SetMode::Merge(g) => (Unguarded::Anything, g),
+                };
+                check_precondition(path, existing.as_ref(), unguarded, guard)?;
                 Some(match s.mode {
-                    SetMode::Merge(_) => existing
-                        .map(|d| d.data)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .chain(s.data.clone())
-                        .collect(),
+                    SetMode::Merge(_) => shallow_merge(existing, &s.data)?,
                     SetMode::Create | SetMode::Overwrite(_) => s.data.clone(),
                 })
             }
             Write::Update(u) => {
-                let current = existing
-                    .as_ref()
-                    .ok_or_else(|| GatewayError::NotFound(path.clone()))?;
-                check_guard(path, existing.as_ref(), u.guard)?;
-                Some(u.ops.iter().try_fold(current.data.clone(), apply_op)?)
+                check_precondition(path, existing.as_ref(), Unguarded::MustExist, u.guard)?;
+                let current = existing.map(|d| d.data).unwrap_or_default();
+                Some(u.ops.iter().try_fold(current, apply_op)?)
             }
             Write::Delete(d) => {
-                if existing.is_none() {
-                    return Err(GatewayError::NotFound(path.clone()));
-                }
-                check_guard(path, existing.as_ref(), d.guard)?;
+                check_precondition(path, existing.as_ref(), Unguarded::MustExist, d.guard)?;
                 None
             }
         };
-        match new_data {
-            Some(data) => {
-                self.docs.borrow_mut().insert(
-                    path.clone(),
-                    Document {
-                        path: path.clone(),
-                        update_time: time,
-                        data,
-                    },
-                );
-            }
-            None => {
-                self.docs.borrow_mut().remove(path);
-            }
-        }
-        Ok(time)
+        Ok(if let Some(data) = new_data {
+            let update_time = self.tick();
+            self.docs.borrow_mut().insert(
+                path.clone(),
+                Document {
+                    path: path.clone(),
+                    update_time,
+                    data,
+                },
+            );
+            Written::Updated(update_time)
+        } else {
+            self.docs.borrow_mut().remove(path);
+            Written::Deleted
+        })
     }
 }
