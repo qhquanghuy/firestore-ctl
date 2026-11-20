@@ -583,6 +583,30 @@ mod tests {
     }
 
     #[test]
+    fn projects_ref_reaches_both_prefixes() {
+        use proptest::strategy::ValueTree as _;
+        use proptest::test_runner::TestRunner;
+
+        let strategy = projects_ref();
+        let mut runner = TestRunner::deterministic();
+        let paths: Vec<String> = (0..1_000)
+            .map(|_| {
+                strategy
+                    .new_tree(&mut runner)
+                    .unwrap()
+                    .current()
+                    .to_string()
+            })
+            .collect();
+        for prefix in ["projects/x/", "projects/p/databases/d/"] {
+            assert!(
+                paths.iter().any(|p| p.starts_with(prefix)),
+                "no sample with prefix: {prefix}"
+            );
+        }
+    }
+
+    #[test]
     fn arbitrary_json_reaches_its_classes() {
         use proptest::strategy::ValueTree as _;
         use proptest::test_runner::TestRunner;
@@ -615,8 +639,12 @@ mod tests {
             j.is_u64() && j.as_i64().is_none()
         });
         reaches("integral double beyond i64", &|&(_, j)| {
-            j.as_f64()
-                .is_some_and(|f| f.fract() == 0.0 && f.abs() >= 9.2e18)
+            j.is_f64()
+                && j.as_f64()
+                    .is_some_and(|f| f.fract() == 0.0 && f.abs() >= 9.2e18)
+        });
+        reaches("untagged non-integral double", &|&(_, j)| {
+            j.is_f64() && j.as_f64().is_some_and(|f| f.fract() != 0.0)
         });
         reaches("array directly inside an array", &|&(_, j)| {
             j.as_array().is_some_and(|xs| xs.iter().any(Json::is_array))
@@ -696,7 +724,7 @@ mod tests {
         }
 
         #[test]
-        fn plain_output_is_marked_and_is_never_read_back_as_typed(d in arb::document()) {
+        fn plain_output_carries_the_plain_marker_through_parsing(d in arb::document()) {
             let json = plain_json::document_to_json(&d);
             prop_assert_eq!(&json["_plain"], &Json::Bool(true));
             if let Ok(input) = typed_json::parse_input(&json) {

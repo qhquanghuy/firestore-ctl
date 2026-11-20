@@ -241,6 +241,32 @@ mod tests {
         ]
     }
 
+    #[test]
+    fn list_elements_reach_their_classes() {
+        use proptest::strategy::ValueTree as _;
+        use proptest::test_runner::TestRunner;
+
+        let strategy = list_element();
+        let mut runner = TestRunner::deterministic();
+        let elements: Vec<(String, Value)> = (0..1_000)
+            .map(|_| strategy.new_tree(&mut runner).unwrap().current())
+            .collect();
+        let reaches = |class: &str, is_member: &dyn Fn(&(String, Value)) -> bool| {
+            assert!(
+                elements.iter().any(is_member),
+                "no sample in class: {class}"
+            );
+        };
+        reaches("integer", &|(_, v)| matches!(v, Value::Int(_)));
+        reaches("quoted text", &|(_, v)| matches!(v, Value::String(_)));
+        reaches("quoted text with a backslash", &|(text, _)| {
+            text.contains("\\\\")
+        });
+        reaches("quoted text with an escaped quote", &|(text, _)| {
+            text.contains("\\\"")
+        });
+    }
+
     proptest! {
         #![proptest_config(arb::config())]
 
@@ -295,7 +321,7 @@ mod tests {
 
         #[test]
         fn parsing_never_panics(
-            prefix in prop::sample::select(vec!["", "ts:", "ref:", "[", "\"", "-", "["]),
+            prefix in prop::sample::select(vec!["", "ts:", "ref:", "[", "\"", "-", "{"]),
             s in arb::text(),
         ) {
             parse_token(&format!("{prefix}{s}")).ok();

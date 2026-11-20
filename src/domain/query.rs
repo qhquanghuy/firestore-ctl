@@ -174,6 +174,27 @@ mod tests {
     }
 
     #[test]
+    fn operators_are_spelled_as_users_type_them() {
+        let spelled = [
+            ("==", Op::Eq),
+            ("!=", Op::Ne),
+            ("<", Op::Lt),
+            ("<=", Op::Le),
+            (">", Op::Gt),
+            (">=", Op::Ge),
+            ("in", Op::In),
+            ("not-in", Op::NotIn),
+            ("array-contains", Op::ArrayContains),
+            ("array-contains-any", Op::ArrayContainsAny),
+        ];
+        assert_eq!(spelled.len(), Op::ALL.len());
+        for (symbol, op) in spelled {
+            assert_eq!(Op::from_symbol(symbol), Some(op), "{symbol}");
+            assert_eq!(op.symbol(), symbol);
+        }
+    }
+
+    #[test]
     fn filter_new_enforces_list_rules() {
         let list = |n: usize| Value::Array(vec![Value::Null; n]);
         assert_eq!(

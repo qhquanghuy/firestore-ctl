@@ -168,7 +168,18 @@ fn agree(a: &Value, b: &Value, double: fn(f64, f64) -> bool) -> bool {
             xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| agree(x, y, double))
         }
         (Value::Map(xs), Value::Map(ys)) => agree_fields(xs, ys, double),
-        _ => a == b,
+        (Value::Double(_) | Value::Geo(_) | Value::Array(_) | Value::Map(_), _) => false,
+        (
+            Value::Null
+            | Value::Bool(_)
+            | Value::Int(_)
+            | Value::String(_)
+            | Value::Timestamp(_)
+            | Value::Bytes(_)
+            | Value::Ref(_)
+            | Value::ForeignRef(_),
+            _,
+        ) => a == b,
     }
 }
 
@@ -228,7 +239,8 @@ fn int() -> impl Strategy<Value = i64> {
     ]
 }
 
-// `f64::ANY` yields no NaN in practice, so the classes the codecs special-case are named.
+// The classes the codecs special-case (NaN, infinities, zeros, subnormals) are rare under
+// `f64::ANY`, so they are pinned by name.
 fn double() -> impl Strategy<Value = f64> {
     prop_oneof![
         4 => prop::num::f64::ANY,
