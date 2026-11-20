@@ -9,8 +9,8 @@ use itertools::Itertools;
 use serde_json::{Map, Value as Json, json};
 
 use crate::app::{AppError, Output};
-use crate::codec::{plain_json, typed_json};
-use crate::domain::{Aggregation, DbTarget, Document};
+use crate::codec::{mark_selected, plain_json, typed_json};
+use crate::domain::{Aggregation, DbTarget, Document, FieldPath, IndexAdvice};
 use crate::port::{AggregateResult, GatewayError, IndexInfo, Written};
 
 /// Shown in a table cell where a document has no such field.
@@ -108,10 +108,14 @@ pub fn render(o: &Output, opts: &RenderOpts) -> String {
 }
 
 /// Text for stderr; ends with `\n` like [`render`]. The error's message once, plus
-/// what to do about it: for a missing index the `gcloud` command and the console link
-/// (each labelled, on its own line); for an authentication failure the login command;
-/// for a permission failure a pointer to IAM. Every variant is listed, so a new one
-/// forces a decision here.
+/// what to do about it: for a missing index the `gcloud` command (composite indexes) or
+/// a description of the index (single-field ones, which have no safe command) and the
+/// console link, each labelled on its own line; for an authentication failure the login
+/// command; for a permission failure a pointer to IAM. Every variant is listed, so a
+/// new one forces a decision here.
+///
+/// Messages can carry server or stored text, so control characters (ESC, C1, DEL, ...)
+/// are shown as escape sequences, as in tables.
 #[must_use]
 pub fn render_error(e: &AppError, t: &DbTarget) -> String {
     let message = e.to_string();
@@ -119,13 +123,9 @@ pub fn render_error(e: &AppError, t: &DbTarget) -> String {
         AppError::MissingIndex {
             advice,
             console_url,
-        } => index_help(
-            message,
-            advice.as_ref().map(|a| a.gcloud_command(t)),
-            console_url.as_ref(),
-        ),
+        } => index_help(message, advice.as_ref(), t, console_url.as_ref()),
         AppError::Gateway(GatewayError::MissingIndex { console_url }) => {
-            index_help(message, None, console_url.as_ref())
+            index_help(message, None, t, console_url.as_ref())
         }
         AppError::Gateway(GatewayError::PermissionDenied(_)) => vec![
             message,
@@ -150,11 +150,22 @@ pub fn render_error(e: &AppError, t: &DbTarget) -> String {
         | AppError::NotFound(_)
         | AppError::Input(_) => vec![message],
     };
-    lines.into_iter().map(|l| l + "\n").collect()
+    lines
+        .into_iter()
+        .map(|line| escape_controls(&line) + "\n")
+        .collect()
 }
 
-/// The message, then the command that creates the index and/or the console link.
-fn index_help(message: String, command: Option<String>, url: Option<&String>) -> Vec<String> {
+/// The message, then what creates the index: the `gcloud` command of a composite index, or
+/// for a single-field one a description (a `gcloud ... fields update --index` would
+/// replace the field's other indexes) pointing at the console link.
+fn index_help(
+    message: String,
+    advice: Option<&IndexAdvice>,
+    t: &DbTarget,
+    url: Option<&String>,
+) -> Vec<String> {
+    let command = advice.and_then(|a| a.gcloud_command(t));
     let open = if command.is_some() {
         "or open:"
     } else {
@@ -166,6 +177,22 @@ fn index_help(message: String, command: Option<String>, url: Option<&String>) ->
                 .into_iter()
                 .flat_map(|c| ["create the index with:".to_owned(), c]),
         )
+        .chain(match advice {
+            Some(IndexAdvice::SingleField {
+                collection_group,
+                field,
+            }) => vec![
+                format!(
+                    "needed: a single-field index on `{}` ({}) with collection-group scope on `{collection_group}`",
+                    field.field,
+                    field.mode.as_str()
+                ),
+                "create it in the console (Firestore > Indexes > Single field), via the link below when there is one. \
+                 `gcloud firestore indexes fields update --index` replaces the field's existing indexes, so no command is suggested."
+                    .to_owned(),
+            ],
+            Some(IndexAdvice::Composite(_)) | None => Vec::new(),
+        })
         .chain(url.into_iter().flat_map(|u| [open.to_owned(), u.clone()]))
         .collect()
 }
@@ -188,8 +215,12 @@ impl Shape {
 
 fn shape(o: &Output, typing: Typing) -> Shape {
     match o {
-        Output::Document(d) => Shape::One(document_json(d, typing)),
-        Output::Documents(ds) => Shape::Many(ds.iter().map(|d| document_json(d, typing)).collect()),
+        Output::Document(d) => Shape::One(document_json(d, typing, None)),
+        Output::Documents { docs, select } => Shape::Many(
+            docs.iter()
+                .map(|d| document_json(d, typing, select.as_deref()))
+                .collect(),
+        ),
         Output::Aggregate(r) => Shape::One(object(aggregate_entries(r, typing))),
         Output::Collections(cs) => {
             Shape::Many(cs.iter().map(|c| Json::String(c.to_string())).collect())
@@ -201,10 +232,15 @@ fn shape(o: &Output, typing: Typing) -> Shape {
     }
 }
 
-fn document_json(d: &Document, typing: Typing) -> Json {
-    match typing {
+/// A document's JSON, marked as a projection when `select` (the query's `--select`) is set.
+fn document_json(d: &Document, typing: Typing, select: Option<&[FieldPath]>) -> Json {
+    let json = match typing {
         Typing::Typed => typed_json::document_to_json(d),
         Typing::Plain => plain_json::document_to_json(d),
+    };
+    match select {
+        Some(fields) => mark_selected(json, fields),
+        None => json,
     }
 }
 
@@ -261,7 +297,7 @@ struct Grid {
 fn grid(o: &Output) -> Grid {
     match o {
         Output::Document(d) => documents_grid(slice::from_ref(d)),
-        Output::Documents(ds) => documents_grid(ds),
+        Output::Documents { docs, .. } => documents_grid(docs),
         Output::Aggregate(r) => entries_grid(&aggregate_entries(r, Typing::Plain)),
         Output::Collections(cs) => Grid {
             header: vec!["collection".to_owned()],
@@ -386,8 +422,12 @@ mod tests {
         }
     }
 
+    fn documents(docs: Vec<Document>) -> Output {
+        Output::Documents { docs, select: None }
+    }
+
     fn two_docs() -> Output {
-        Output::Documents(vec![
+        documents(vec![
             doc(
                 "users/a",
                 &[("name", "Ann".into()), ("score", Value::Double(1.5))],
@@ -498,7 +538,7 @@ mod tests {
         let out = render(&two_docs(), &jsonl());
         assert_eq!(out.lines().count(), 2);
         assert!(out.lines().all(|l| parse(l)["_path"].is_string()));
-        assert_eq!(render(&Output::Documents(vec![]), &jsonl()), "");
+        assert_eq!(render(&documents(vec![]), &jsonl()), "");
     }
 
     #[test]
@@ -578,7 +618,7 @@ mod tests {
 
     #[test]
     fn empty_documents_render_header_only_table_and_empty_json() {
-        let o = Output::Documents(vec![]);
+        let o = documents(vec![]);
         let t = render(&o, &table());
         assert_eq!(cells(t.lines().nth(1).unwrap()), ["_path", "_updateTime"]);
         assert!(!t.contains('—'));
@@ -777,7 +817,7 @@ mod tests {
     }
 
     #[test]
-    fn single_field_advice_renders_its_command() {
+    fn single_field_advice_describes_the_index_and_suggests_no_command() {
         let q = Query {
             scope: Scope::Group {
                 parent: None,
@@ -796,13 +836,90 @@ mod tests {
         ));
         let e = AppError::MissingIndex {
             advice,
-            console_url: None,
+            console_url: Some("https://console/idx".to_owned()),
         };
         let out = render_error(&e, &target());
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 5, "{out}");
         assert!(
-            out.contains("gcloud firestore indexes fields update age --project=p --database=d"),
+            lines[1].contains("`age` (desc)") && lines[1].contains("collection-group scope"),
             "{out}"
         );
+        assert!(lines[1].contains("`users`"), "{out}");
+        assert!(
+            lines[2].contains("replaces the field's existing indexes"),
+            "{out}"
+        );
+        assert_eq!(&lines[3..], ["open:", "https://console/idx"]);
+        // the only mention of the command is the warning against it
+        assert!(!out.contains("create the index with:"), "{out}");
+        assert!(!out.contains("--project"), "{out}");
+    }
+
+    #[test]
+    fn error_messages_escape_control_characters() {
+        let e = AppError::Gateway(GatewayError::Other(
+            "boom\u{1b}[2J\u{85}\u{7f}\nnext\ttab".to_owned(),
+        ));
+        let out = render_error(&e, &target());
+        assert_eq!(out, "boom\\u{1b}[2J\\u{85}\\u{7f}\\nnext\\ttab\n");
+        let url = AppError::Gateway(GatewayError::MissingIndex {
+            console_url: Some("https://x/\u{1b}[31m".to_owned()),
+        });
+        assert!(!render_error(&url, &target()).contains('\u{1b}'));
+    }
+
+    #[test]
+    fn selected_documents_are_marked_with_their_field_paths() {
+        let select = vec!["name".parse().unwrap(), "`a b`.c".parse().unwrap()];
+        let o = Output::Documents {
+            docs: vec![doc("users/a", &[("name", "Ann".into())])],
+            select: Some(select),
+        };
+        for typing in [Typing::Typed, Typing::Plain] {
+            let out = parse(&render(&o, &opts(Format::Json, Layout::Compact, typing)));
+            assert_eq!(out[0]["_select"], json!(["name", "`a b`.c"]), "{typing:?}");
+        }
+        let line = render(&o, &jsonl());
+        assert_eq!(parse(&line)["_select"], json!(["name", "`a b`.c"]));
+        // no projection, no marker
+        assert!(
+            parse(&render(&two_docs(), &compact_json()))[0]
+                .get("_select")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn plain_documents_are_marked_plain_and_typed_ones_are_not() {
+        let o = Output::Document(doc("users/a", &[("n", Value::Int(1))]));
+        let plain = parse(&render(
+            &o,
+            &opts(Format::Json, Layout::Compact, Typing::Plain),
+        ));
+        assert_eq!(plain["_plain"], json!(true));
+        assert!(parse(&render(&o, &compact_json())).get("_plain").is_none());
+    }
+
+    #[test]
+    fn foreign_references_render_as_their_full_name() {
+        let name = "projects/q/databases/d2/documents/users/u9";
+        let o = Output::Document(doc(
+            "users/a",
+            &[("r", Value::ForeignRef(name.parse().unwrap()))],
+        ));
+        assert_eq!(
+            parse(&render(&o, &compact_json()))["data"]["r"],
+            json!({"$ref": name})
+        );
+        assert_eq!(
+            parse(&render(
+                &o,
+                &opts(Format::Json, Layout::Compact, Typing::Plain)
+            ))["data"]["r"],
+            json!(name)
+        );
+        assert!(render(&o, &table()).contains(name));
     }
 
     #[test]

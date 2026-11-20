@@ -181,30 +181,28 @@ fn direction_mode(direction: Direction) -> IndexMode {
     }
 }
 
-impl IndexAdvice {
-    /// A shell command creating the advised index in `t`'s database.
-    #[must_use]
-    pub fn gcloud_command(&self, t: &DbTarget) -> String {
+impl IndexMode {
+    /// The mode as `gcloud firestore indexes composite create --field-config` spells it.
+    fn gcloud_config(self) -> &'static str {
         match self {
-            Self::Composite(spec) => spec.gcloud_command(t),
-            Self::SingleField {
-                collection_group,
-                field,
-            } => {
-                let config = match field.mode {
-                    IndexMode::Asc => "order=ascending",
-                    IndexMode::Desc => "order=descending",
-                    IndexMode::ArrayContains => "array-config=contains",
-                };
-                shell_join(&[
-                    "gcloud firestore indexes fields update".to_owned(),
-                    field.field.to_firestore(),
-                    format!("--project={}", t.project),
-                    format!("--database={}", t.database),
-                    format!("--collection-group={collection_group}"),
-                    format!("--index={config},query-scope=collection-group"),
-                ])
-            }
+            Self::Asc => "order=ascending",
+            Self::Desc => "order=descending",
+            Self::ArrayContains => "array-config=contains",
+        }
+    }
+}
+
+impl IndexAdvice {
+    /// A shell command creating the advised index in `t`'s database, when one is safe to
+    /// suggest: a composite index. A single-field index has none, because
+    /// `gcloud firestore indexes fields update --index=...` replaces *all* of the
+    /// field's indexes, deleting the ones it does not list; the user is pointed at the
+    /// console link instead.
+    #[must_use]
+    pub fn gcloud_command(&self, t: &DbTarget) -> Option<String> {
+        match self {
+            Self::Composite(spec) => Some(spec.gcloud_command(t)),
+            Self::SingleField { .. } => None,
         }
     }
 }
@@ -218,14 +216,10 @@ impl IndexSpec {
             QueryScope::CollectionGroup => "COLLECTION_GROUP",
         };
         let fields = self.fields.iter().map(|f| {
-            let config = match f.mode {
-                IndexMode::Asc => "order=ascending",
-                IndexMode::Desc => "order=descending",
-                IndexMode::ArrayContains => "array-config=contains",
-            };
             format!(
-                "--field-config=field-path={},{config}",
-                f.field.to_firestore()
+                "--field-config=field-path={},{}",
+                f.field.to_firestore(),
+                f.mode.gcloud_config()
             )
         });
         let words: Vec<String> = [
@@ -457,7 +451,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
-            advice.gcloud_command(&target("p", "(default)")),
+            advice.gcloud_command(&target("p", "(default)")).unwrap(),
             "gcloud firestore indexes composite create --project=p '--database=(default)' \
              --collection-group=users --query-scope=COLLECTION \
              --field-config=field-path=tags,array-config=contains \
@@ -466,20 +460,16 @@ mod tests {
     }
 
     #[test]
-    fn single_field_commands_have_exact_shape() {
+    fn single_field_advice_has_no_command() {
         let t = target("p", "d");
-        let ordered = required_index(&group("users", &[], &["age:desc"])).unwrap();
-        assert_eq!(
-            ordered.gcloud_command(&t),
-            "gcloud firestore indexes fields update age --project=p --database=d \
-             --collection-group=users --index=order=descending,query-scope=collection-group"
-        );
-        let array = required_index(&group("users", &["tags array-contains x"], &[])).unwrap();
-        assert_eq!(
-            array.gcloud_command(&t),
-            "gcloud firestore indexes fields update tags --project=p --database=d \
-             --collection-group=users --index=array-config=contains,query-scope=collection-group"
-        );
+        for q in [
+            group("users", &[], &["age:desc"]),
+            group("users", &["tags array-contains x"], &[]),
+        ] {
+            let advice = required_index(&q).unwrap();
+            assert!(matches!(advice, IndexAdvice::SingleField { .. }));
+            assert_eq!(advice.gcloud_command(&t), None);
+        }
     }
 
     #[test]
@@ -489,12 +479,6 @@ mod tests {
         assert!(
             cmd.contains("'--field-config=field-path=`my field`,order=ascending'"),
             "{cmd}"
-        );
-        let single = required_index(&group("users", &[], &["`my field`"])).unwrap();
-        assert!(
-            single
-                .gcloud_command(&target("p", "d"))
-                .contains("update '`my field`' --project=p"),
         );
     }
 }

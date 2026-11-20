@@ -32,7 +32,9 @@ Authentication:
 
 1. Application Default Credentials, if present (`GOOGLE_APPLICATION_CREDENTIALS`, the
    login from `gcloud auth application-default login`, or a Google-hosted environment).
-2. Otherwise (or if ADC fails) a token from `gcloud auth print-access-token`.
+   If ADC is present but fails (expired login, unreachable token endpoint), that failure
+   is reported; `fsq` never falls back to another identity.
+2. Only when there is no ADC source at all, a token from `gcloud auth print-access-token`.
 
 If `FIRESTORE_EMULATOR_HOST` is set, it takes precedence: requests go to that emulator with
 no Google credentials (project ids like `demo-foo` need no login). A bare `host:port` is
@@ -121,7 +123,8 @@ and tag values JSON cannot express:
 | Tag | Meaning |
 | --- | --- |
 | `{"$ts": "2026-01-05T10:00:00.123456Z"}` | timestamp |
-| `{"$ref": "users/u1"}` | document reference |
+| `{"$ref": "users/u1"}` | document reference in this database |
+| `{"$ref": "projects/P/databases/D/documents/users/u1"}` | reference into another database or project (its full resource name; written back verbatim) |
 | `{"$double": 1.5}` | double (`"NaN"`, `"Infinity"` as strings); a bare JSON integer is an integer |
 | `{"$bytes": "aGk="}` | bytes, standard base64 with padding |
 | `{"$geo": {"lat": 1.5, "lng": -2.0}}` | geo point |
@@ -129,15 +132,37 @@ and tag values JSON cannot express:
 
 `set --data` takes a bare object of fields (`{"name": "Ann"}`) or a whole document as
 `get` prints it, which can be fed straight back to `set --overwrite --data -` (its `_path`
-must match the target). With `--merge`, nested maps are merged field by field: only the
+must match the target). A whole document is recognised by its `_path` or `_updateTime`
+key; any other object is bare field data, so `{"data": {...}}` alone is a document with
+one field named `data`. With `--merge`, nested maps are merged field by field: only the
 fields you give are changed, siblings (including inside nested maps) are kept. Without
-`--merge`, `--overwrite` replaces the whole document. `--plain` prints untagged JSON for humans and `jq`; it cannot be read back
-losslessly. Firestore stores timestamps with microsecond precision.
+`--merge`, `--overwrite` replaces the whole document. Firestore stores timestamps with
+microsecond precision.
+
+Two kinds of output are lossy, so they are marked and `set` refuses to write them back:
+
+- `--plain` prints untagged JSON for humans and `jq` and adds `"_plain": true` to every
+  document. `set --data` rejects any input carrying it (exit 2): a timestamp
+  would be written back as a string.
+- `query --select a,b` documents carry `"_select": ["a", "b"]` and hold only those fields.
+  `set --overwrite` (and a plain create) reject them (exit 2): they would drop every other
+  field. `set --merge` accepts them and changes only the selected fields; `_select`
+  itself is never stored.
+
+The `_plain` and `_select` keys are markers wherever they appear at the top level of
+`--data`, even after `_path` and `_updateTime` were stripped; to store a field with one of
+those names, use the full-document form and put it inside `data`.
 
 ### Indexes
 
 `fsq indexes` lists composite indexes through the Firestore Admin API, so it needs credentials
 with the `datastore.indexes.list` permission, and it is not supported by the emulator.
+
+When a query fails for want of an index (exit 7), the error shows the `gcloud` command for a
+composite index and the console link. A collection-group query that needs only a single-field
+index gets a description and the console link but no command: `gcloud firestore indexes
+fields update --index` replaces all of a field's indexes, so it is not suggested. `count`
+with `--sum` or `--avg` gets the console link only.
 
 ### Output
 
@@ -153,6 +178,12 @@ unchanged since you read it. Pass the `_updateTime` from `get` verbatim (nanosec
 included). The write exits 5 if the document changed or is missing. It works on `set`
 (with `--overwrite` or `--merge`), `update` and `delete`.
 
+`set --overwrite` and `set --merge` guard themselves when `--data` is a whole document
+from `get`: its `_updateTime` is used as the guard, so get, edit, set fails with exit 5 if
+the document changed meanwhile. Pass `--force` to overwrite anyway, or an explicit
+`--if-unchanged-since` to name another time. Bare field data carries no time and is not
+guarded.
+
 ```sh
 t=$(fsq get users/u1 | jq -r ._updateTime)
 fsq update users/u1 --set status=\"done\" --if-unchanged-since "$t"
@@ -160,17 +191,18 @@ fsq update users/u1 --set status=\"done\" --if-unchanged-since "$t"
 
 ### Limits
 
-`query` returns at most 100 documents unless `--limit N` or `--all`. Every call has a 60
-second deadline.
+`query` returns at most 100 documents unless `--limit N` or `--all`; when it stops at exactly
+100 by default, a note on stderr says there may be more (stdout is unchanged). Every call
+has a 60 second deadline.
 
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
 | 0 | ok |
-| 1 | other error |
+| 1 | other error (including a missing database or project) |
 | 2 | usage error (bad flag, path, filter, field op or `--data`) |
-| 3 | not found |
+| 3 | document not found |
 | 4 | already exists |
 | 5 | precondition failed (changed since `--if-unchanged-since`, or missing) |
 | 6 | writes disabled for this database |
@@ -198,7 +230,7 @@ zsh, which does not split. Names that need quoting are shell-escaped for you.
 Unit and CLI tests need nothing: `cargo nextest run` (inside `nix develop`).
 
 The end-to-end suite in `tests/emulator.rs` runs the real binary against the Firestore
-emulator. Its tests are `#[ignore]`d, use their own `demo-` projects, and refuse to run
+emulator. Its tests (all but one, which runs anywhere) are `#[ignore]`d, use their own `demo-` projects, and refuse to run
 unless `FIRESTORE_EMULATOR_HOST` is a local address. `firebase.json` configures the
 emulator (port 8080). The first run downloads the emulator jar. Each test clears its own
 project first, so the suite can be re-run against a running emulator.

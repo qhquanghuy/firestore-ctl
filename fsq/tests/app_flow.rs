@@ -346,8 +346,9 @@ async fn query_filters_by_equality() {
     let query = |name| Request::Query(users_query(vec![eq("name", name)], vec![]));
     let hit = exec(&ctx_read_only(), &fs, query("Ann")).await;
     let miss = exec(&ctx_read_only(), &fs, query("Zed")).await;
-    assert_eq!(hit, Ok(Output::Documents(vec![doc("users/u1")])));
-    assert_eq!(miss, Ok(Output::Documents(vec![])));
+    let documents = |docs| Ok(Output::Documents { docs, select: None });
+    assert_eq!(hit, documents(vec![doc("users/u1")]));
+    assert_eq!(miss, documents(vec![]));
 }
 
 #[tokio::test]
@@ -394,6 +395,37 @@ async fn aggregate_missing_index_carries_advice() {
             ..
         })
     ));
+}
+
+#[tokio::test]
+async fn aggregate_advice_is_only_for_a_plain_count() {
+    let fs = FakeFirestore::default().without_index();
+    let run_with = |aggregations: Vec<Aggregation>| {
+        let fs = &fs;
+        async move {
+            let q = AggregateQuery {
+                query: users_query(vec![eq("name", "Ann")], vec![order("age")]),
+                aggregations: NonEmptyVec::try_from(aggregations).unwrap(),
+            };
+            exec(&ctx_read_only(), fs, Request::Aggregate(q)).await
+        }
+    };
+    for aggregation in [
+        Aggregation::Sum("total".parse().unwrap()),
+        Aggregation::Avg("total".parse().unwrap()),
+    ] {
+        let r = run_with(vec![Aggregation::Count, aggregation]).await;
+        assert!(
+            matches!(
+                &r,
+                Err(AppError::MissingIndex {
+                    advice: None,
+                    console_url: Some(_),
+                })
+            ),
+            "{r:?}"
+        );
+    }
 }
 
 #[tokio::test]

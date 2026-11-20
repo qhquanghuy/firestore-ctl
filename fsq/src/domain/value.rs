@@ -139,6 +139,51 @@ impl GeoPoint {
     }
 }
 
+/// Why a string is not a [`DocResourceName`].
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error(
+    "`{0}` is not a full document resource name (projects/<project>/databases/<database>/documents/<collection>/<doc>)"
+)]
+pub struct ResourceNameError(String);
+
+/// The full resource name of a document in some database, as Firestore stores a
+/// reference: `projects/P/databases/D/documents/users/u1`. Held by
+/// [`Value::ForeignRef`] for references that point outside the database being read.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DocResourceName(String);
+
+impl DocResourceName {
+    /// The name as Firestore writes it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for DocResourceName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl FromStr for DocResourceName {
+    type Err = ResourceNameError;
+
+    /// Accepts `projects/<p>/databases/<d>/documents/<document path>`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts = s
+            .strip_prefix("projects/")
+            .and_then(|rest| rest.split_once("/databases/"))
+            .filter(|(project, _)| !project.is_empty() && !project.contains('/'))
+            .and_then(|(_, rest)| rest.split_once("/documents/"))
+            .filter(|(database, _)| !database.is_empty() && !database.contains('/'));
+        parts
+            .filter(|(_, path)| path.parse::<DocPath>().is_ok())
+            .map(|_| Self(s.to_owned()))
+            .ok_or_else(|| ResourceNameError(s.to_owned()))
+    }
+}
+
 /// The fields of a document or map value, ordered by key.
 pub type Fields = BTreeMap<String, Value>;
 
@@ -159,8 +204,11 @@ pub enum Value {
     Timestamp(Timestamp),
     /// Raw bytes.
     Bytes(Vec<u8>),
-    /// A reference to another document.
+    /// A reference to another document in the same database.
     Ref(DocPath),
+    /// A reference to a document in another database or project, kept as its full
+    /// resource name.
+    ForeignRef(DocResourceName),
     /// A geographic point.
     Geo(GeoPoint),
     /// An ordered list of values.
@@ -205,5 +253,33 @@ mod tests {
         assert!(GeoPoint::new(f64::NAN, 0.0).is_err());
         let p = GeoPoint::new(35.5, 139.7).unwrap();
         assert_eq!((p.lat(), p.lng()), (35.5, 139.7));
+    }
+
+    #[test]
+    fn resource_name_is_a_full_document_name() {
+        for ok in [
+            "projects/p/databases/(default)/documents/users/u1",
+            "projects/p/databases/d/documents/users/u1/orders/o1",
+        ] {
+            let name: DocResourceName = ok.parse().unwrap();
+            assert_eq!((name.as_str(), name.to_string()), (ok, ok.to_owned()));
+        }
+        for bad in [
+            "",
+            "users/u1",
+            "projects/p/databases/d",
+            "projects/p/databases/d/documents",
+            "projects/p/databases/d/documents/users",
+            "projects//databases/d/documents/users/u1",
+            "projects/p/databases//documents/users/u1",
+            "projects/p/q/databases/d/documents/users/u1",
+            "projects/p/databases/d/documents/users//u1",
+        ] {
+            assert_eq!(
+                bad.parse::<DocResourceName>(),
+                Err(ResourceNameError(bad.to_owned())),
+                "{bad}"
+            );
+        }
     }
 }

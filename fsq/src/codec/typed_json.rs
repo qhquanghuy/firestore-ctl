@@ -6,7 +6,7 @@
 //! | integer | JSON integer (never passes through `f64`) |
 //! | double | `{"$double": 1.5}`; NaN/infinities `{"$double": "NaN" \| "Infinity" \| "-Infinity"}` |
 //! | timestamp | `{"$ts": "2026-01-05T10:00:00.123456789Z"}` (RFC 3339, full nanoseconds) |
-//! | reference | `{"$ref": "teams/t1"}` (relative to the current database) |
+//! | reference | `{"$ref": "teams/t1"}` (relative to the current database); in another database, its full resource name `{"$ref": "projects/p/databases/d/documents/teams/t1"}` |
 //! | bytes | `{"$bytes": "<standard base64 with padding>"}` |
 //! | geo point | `{"$geo": {"lat": 1.5, "lng": -2.0}}` |
 //! | array | JSON array (an array directly inside an array is rejected: Firestore forbids it) |
@@ -32,7 +32,9 @@ use serde_json::{Map, Number, Value as Json, json};
 
 use super::{CodecError, double_json, fields_to_object};
 use crate::domain::document::Document;
-use crate::domain::value::{Fields, GeoPoint, Timestamp, Value};
+use crate::domain::field::FieldPath;
+use crate::domain::path::DocPath;
+use crate::domain::value::{DocResourceName, Fields, GeoPoint, Timestamp, UpdateTime, Value};
 
 /// Encodes a value as typed JSON.
 #[must_use]
@@ -46,6 +48,7 @@ pub fn value_to_json(v: &Value) -> Json {
         Value::Timestamp(t) => json!({"$ts": t.to_string()}),
         Value::Bytes(b) => json!({"$bytes": STANDARD.encode(b)}),
         Value::Ref(p) => json!({"$ref": p.to_string()}),
+        Value::ForeignRef(n) => json!({"$ref": n.as_str()}),
         Value::Geo(g) => {
             json!({"$geo": {"lat": double_json(g.lat()), "lng": double_json(g.lng())}})
         }
@@ -83,33 +86,99 @@ pub fn value_from_json(j: &Json) -> Result<Value, CodecError> {
     decode(j, "")
 }
 
-/// Reads the fields of a document from `set --data` input.
+/// A decoded `set --data` input.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Input {
+    /// The document's fields.
+    pub fields: Fields,
+    /// What the input says about itself when it is a full document (the shape `get`
+    /// prints), `None` for bare data.
+    pub envelope: Option<Envelope>,
+}
+
+/// The top-level keys of a printed document besides its `data`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Envelope {
+    /// `_path`: the document the input was read from.
+    pub path: Option<DocPath>,
+    /// `_updateTime`: when that document last changed.
+    pub update_time: Option<UpdateTime>,
+    /// `_plain` was present: the input is `--plain` output, which is lossy.
+    pub plain: bool,
+    /// `_select`: the input is a `--select` projection holding only these fields.
+    pub select: Option<Vec<FieldPath>>,
+}
+
+/// Reads `set --data` input.
 ///
-/// The input is a *full document* (the shape `get` prints) if it has a `_path`
-/// or `_updateTime` key, or if `data` is its only key; its `data` object is then
-/// required, and any other top-level key is an error rather than being dropped
-/// (fields belong inside `data`). Otherwise the object itself is the bare data.
-/// A bare object whose only field is a map named `data` is therefore read as a
-/// full document.
+/// The input is a *full document* (the shape `get` prints) only if it has a `_path` or
+/// an `_updateTime` key; its `data` object is then required, and any top-level key other
+/// than `_path`, `_updateTime`, `data` and the output markers `_plain` and `_select` is
+/// an error rather than being dropped (fields belong inside `data`). Anything else is
+/// bare data whose keys are the field names, so `{"data": {...}}` alone is a document
+/// with one field named `data`.
+///
+/// The markers are reserved top-level keys wherever they appear, so stripping `_path` and
+/// `_updateTime` from printed output does not hide where it came from: they are reported in
+/// the [`Envelope`] and are never fields. (To store a field named `_plain` or `_select`, use
+/// the full-document form and put it inside `data`.)
 ///
 /// # Errors
 /// [`CodecError`] if the input is not an object, a full document lacks an object
-/// `data` or has stray top-level keys, or a field fails to decode.
-pub fn fields_from_input(j: &Json) -> Result<Fields, CodecError> {
+/// `data`, has stray top-level keys or a malformed `_path`, `_updateTime` or
+/// `_select`, or a field fails to decode.
+pub fn parse_input(j: &Json) -> Result<Input, CodecError> {
     let top = j
         .as_object()
         .ok_or_else(|| CodecError::new("", "expected a JSON object"))?;
     let is_full_document = ["_path", "_updateTime"]
         .iter()
-        .any(|k| top.contains_key(*k))
-        || (top.len() == 1 && top.contains_key("data"));
-    if !is_full_document {
-        return decode_fields(top, "");
+        .any(|k| top.contains_key(*k));
+    let plain = top.contains_key("_plain");
+    let select = top.get("_select").map(select_paths).transpose()?;
+    if !is_full_document && !plain && select.is_none() {
+        return decode_fields(top, "").map(|fields| Input {
+            fields,
+            envelope: None,
+        });
     }
-    if let Some(stray) = top
-        .keys()
-        .find(|k| !matches!(k.as_str(), "_path" | "_updateTime" | "data"))
-    {
+    let fields = if is_full_document {
+        full_document_fields(top)?
+    } else {
+        let data: Map<String, Json> = top
+            .iter()
+            .filter(|(k, _)| !matches!(k.as_str(), "_plain" | "_select"))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        decode_fields(&data, "")?
+    };
+    let envelope = Envelope {
+        path: envelope_value(top, "_path", |s| {
+            s.parse::<DocPath>()
+                .map_err(|e| format!("`{s}` is not a document path: {e}"))
+        })?,
+        update_time: envelope_value(top, "_updateTime", |s| {
+            s.parse::<UpdateTime>()
+                .map_err(|e| format!("invalid RFC 3339 timestamp: {e}"))
+        })?,
+        plain,
+        select,
+    };
+    Ok(Input {
+        fields,
+        envelope: Some(envelope),
+    })
+}
+
+/// The decoded `data` of a full document `top`; any other top-level key besides the
+/// envelope's is an error.
+fn full_document_fields(top: &Map<String, Json>) -> Result<Fields, CodecError> {
+    if let Some(stray) = top.keys().find(|k| {
+        !matches!(
+            k.as_str(),
+            "_path" | "_updateTime" | "data" | "_plain" | "_select"
+        )
+    }) {
         return Err(CodecError::new(
             &child("", stray),
             format!(
@@ -121,6 +190,40 @@ pub fn fields_from_input(j: &Json) -> Result<Fields, CodecError> {
         .and_then(Json::as_object)
         .ok_or_else(|| CodecError::new("/data", "a full document needs a `data` object"))
         .and_then(|data| decode_fields(data, "/data"))
+}
+
+/// The string at top-level `key`, parsed with `parse`; `None` when the key is absent.
+fn envelope_value<T>(
+    top: &Map<String, Json>,
+    key: &str,
+    parse: impl Fn(&str) -> Result<T, String>,
+) -> Result<Option<T>, CodecError> {
+    let at = child("", key);
+    top.get(key)
+        .map(|v| {
+            v.as_str()
+                .ok_or_else(|| CodecError::new(&at, "must be a string"))
+                .and_then(|s| parse(s).map_err(|reason| CodecError::new(&at, reason)))
+        })
+        .transpose()
+}
+
+/// The field paths of a `_select` array.
+fn select_paths(j: &Json) -> Result<Vec<FieldPath>, CodecError> {
+    j.as_array()
+        .ok_or_else(|| CodecError::new("/_select", "must be an array of field paths"))?
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let at = child("/_select", &i.to_string());
+            p.as_str()
+                .ok_or_else(|| CodecError::new(&at, "must be a string"))
+                .and_then(|s| {
+                    s.parse::<FieldPath>()
+                        .map_err(|e| CodecError::new(&at, e.to_string()))
+                })
+        })
+        .collect()
 }
 
 /// Appends one escaped segment (RFC 6901) to a JSON pointer.
@@ -211,11 +314,7 @@ fn decode_tag(tag: &str, inner: &Json, at: &str) -> Result<Value, CodecError> {
                 .map(Value::Timestamp)
                 .map_err(|e| CodecError::new(at, format!("invalid RFC 3339 timestamp: {e}")))
         }),
-        "$ref" => string().and_then(|s| {
-            s.parse()
-                .map(Value::Ref)
-                .map_err(|e| CodecError::new(at, format!("invalid document path: {e}")))
-        }),
+        "$ref" => string().and_then(|s| decode_ref(s, at)),
         "$bytes" => string().and_then(|s| {
             STANDARD
                 .decode(s)
@@ -270,4 +369,20 @@ fn decode_geo(inner: &Json, at: &str) -> Result<Value, CodecError> {
     GeoPoint::new(coord("lat")?, coord("lng")?)
         .map(Value::Geo)
         .map_err(|e| CodecError::new(at, e.to_string()))
+}
+
+/// A `$ref` value: a full resource name (`projects/...`, a reference into another
+/// database) or a document path relative to the current database. The two never
+/// overlap: a resource name has an odd number of segments, a document path an even one.
+fn decode_ref(s: &str, at: &str) -> Result<Value, CodecError> {
+    if let Some(name) = s
+        .starts_with("projects/")
+        .then(|| s.parse::<DocResourceName>().ok())
+        .flatten()
+    {
+        return Ok(Value::ForeignRef(name));
+    }
+    s.parse::<DocPath>()
+        .map(Value::Ref)
+        .map_err(|e| CodecError::new(at, format!("invalid document path: {e}")))
 }

@@ -19,7 +19,10 @@ pub use path::{AnyPath, CollectionPath, DocPath, PathError};
 pub use query::{
     AggregateQuery, Aggregation, Direction, Filter, FilterError, Limit, Op, OrderBy, Query, Scope,
 };
-pub use value::{Fields, GeoPoint, GeoPointError, Timestamp, UpdateTime, Value};
+pub use value::{
+    DocResourceName, Fields, GeoPoint, GeoPointError, ResourceNameError, Timestamp, UpdateTime,
+    Value,
+};
 pub use write::{
     DeleteDoc, FieldOp, Guard, SetDoc, SetMode, UpdateDoc, Write, WriteError, check_field_ops,
 };

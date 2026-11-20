@@ -8,13 +8,26 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 use fsq::app::{self, AppError, Context};
-use fsq::cli::{Cli, Cmd};
+use fsq::cli::{Cli, Cmd, truncation_note};
 use fsq::complete::{COMPLETE_VAR, registration_line, shells};
 use fsq::domain::DbTarget;
 use fsq::exit::exit_code;
 use fsq::grpc;
 use fsq::policy::{PolicyError, WritePolicy};
 use fsq::render::{render, render_error};
+
+/// Writes `text` to stdout and returns the exit code for it. A closed pipe (`| head`) means
+/// the reader went away, which is not an error worth reporting.
+fn emit(text: &str) -> ExitCode {
+    match io::stdout().write_all(text.as_bytes()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("cannot write output: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
 
 /// Prints `e` to stderr and returns its exit code.
 fn fail(e: &AppError, target: &DbTarget) -> ExitCode {
@@ -51,14 +64,7 @@ async fn run() -> ExitCode {
     let cli = Cli::parse();
 
     if let Cmd::Completions { shell } = &cli.cmd {
-        return match writeln!(io::stdout(), "{}", registration_line(*shell)) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("cannot write output: {e}");
-                ExitCode::from(1)
-            }
-        };
+        return emit(&format!("{}\n", registration_line(*shell)));
     }
 
     let target = match cli.conn.target(|name| std::env::var(name).ok()) {
@@ -74,6 +80,7 @@ async fn run() -> ExitCode {
     let opts = cli.out.render_opts(io::stdout().is_terminal());
 
     let is_write = cli.cmd.is_write();
+    let default_limit = cli.cmd.uses_default_limit();
     let parsed = WritePolicy::from_env_value(std::env::var("FSQ_WRITABLE").ok().as_deref());
     let ctx = match effective_policy(parsed, is_write) {
         Ok(policy) => Context {
@@ -97,15 +104,12 @@ async fn run() -> ExitCode {
     .await;
 
     match outcome {
-        Ok(output) => match io::stdout().write_all(render(&output, &opts).as_bytes()) {
-            Ok(()) => ExitCode::SUCCESS,
-            // The reader (`| head`) went away: not an error worth reporting.
-            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("cannot write output: {e}");
-                ExitCode::from(1)
+        Ok(output) => {
+            if let Some(note) = truncation_note(default_limit, &output) {
+                eprint!("{note}");
             }
-        },
+            emit(&render(&output, &opts))
+        }
         Err(e) => fail(&e, &target),
     }
 }

@@ -1,6 +1,7 @@
 //! End-to-end tests against the Firestore emulator, driven through the real binary.
 //!
-//! All tests are ignored by default. Run them with
+//! The tests that need the emulator are `#[ignore]`d (`is_local_accepts_only_loopback` is
+//! not and runs everywhere). Run them with
 //! `firebase emulators:exec --only firestore --project demo-fsq 'cargo nextest run --test emulator --run-ignored all'`.
 //! Each test clears its project through the emulator first, so the suite can be re-run.
 //! Each test uses its own `demo-` project, so tests do not see each other's documents,
@@ -11,6 +12,7 @@
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::time::Duration;
 
 use assert_cmd::Command;
 use pretty_assertions::assert_eq;
@@ -37,6 +39,12 @@ fn clear_project(host: &str, project: &str) {
          Host: {host}\r\nConnection: close\r\n\r\n"
     );
     let mut stream = TcpStream::connect(host).expect("emulator is reachable");
+    // A hung emulator must fail the test, not hang the suite.
+    let timeout = Some(Duration::from_secs(10));
+    stream.set_read_timeout(timeout).expect("set read timeout");
+    stream
+        .set_write_timeout(timeout)
+        .expect("set write timeout");
     stream
         .write_all(request.as_bytes())
         .expect("send clear request");
@@ -536,4 +544,193 @@ fn set_merge_combines_nested_maps_field_by_field() {
         &fresh,
     ]);
     assert_eq!(emu.json(&["get", "users/u1"])["data"]["n"], 3);
+}
+
+/// The `_updateTime` of `path`.
+fn update_time(emu: &Emulator, path: &str) -> String {
+    emu.json(&["get", path])["_updateTime"]
+        .as_str()
+        .expect("_updateTime")
+        .to_owned()
+}
+
+#[test]
+#[ignore = "needs FIRESTORE_EMULATOR_HOST"]
+fn writing_back_a_stale_document_fails_unless_forced() {
+    let emu = Emulator::project("stale-input");
+    emu.create("users/u1", &json!({"n": 1, "m": 1}));
+    // get -> (someone else changes it) -> edit -> set
+    let read = emu.ok(&["get", "users/u1"]);
+    emu.ok(&["update", "users/u1", "--set", "n=2"]);
+    let edited = read.replace(r#""n":1"#, r#""n":9"#);
+    assert_ne!(edited, read);
+
+    for mode in ["--overwrite", "--merge"] {
+        emu.fsq(&["set", "users/u1", mode, "--data", "-"])
+            .write_stdin(edited.clone())
+            .assert()
+            .code(5);
+    }
+    assert_eq!(
+        emu.json(&["get", "users/u1"])["data"],
+        json!({"n": 2, "m": 1})
+    );
+
+    // --force skips the implicit guard
+    emu.ok_with_stdin(
+        &["set", "users/u1", "--overwrite", "--force", "--data", "-"],
+        &edited,
+    );
+    assert_eq!(
+        emu.json(&["get", "users/u1"])["data"],
+        json!({"n": 9, "m": 1})
+    );
+
+    // an unchanged document writes back fine, with no flag at all
+    let fresh = emu.ok(&["get", "users/u1"]);
+    emu.ok_with_stdin(&["set", "users/u1", "--merge", "--data", "-"], &fresh);
+
+    // an explicit guard wins over the document's own time
+    let current = update_time(&emu, "users/u1");
+    emu.fsq(&[
+        "set",
+        "users/u1",
+        "--overwrite",
+        "--data",
+        "-",
+        "--if-unchanged-since",
+        "2020-01-01T00:00:00Z",
+    ])
+    .write_stdin(fresh.clone())
+    .assert()
+    .code(5);
+    emu.ok_with_stdin(
+        &[
+            "set",
+            "users/u1",
+            "--overwrite",
+            "--data",
+            "-",
+            "--if-unchanged-since",
+            &current,
+        ],
+        &fresh,
+    );
+}
+
+#[test]
+#[ignore = "needs FIRESTORE_EMULATOR_HOST"]
+fn plain_output_cannot_be_set_back() {
+    let emu = Emulator::project("plain-guard");
+    emu.create(
+        "users/u1",
+        &json!({"when": {"$ts": "2026-01-05T10:00:00Z"}}),
+    );
+    let plain = emu.ok(&["get", "users/u1", "--plain"]);
+    assert_eq!(parse(&plain)["_plain"], json!(true));
+    for mode in ["--overwrite", "--merge"] {
+        emu.fsq(&["set", "users/u1", mode, "--data", "-"])
+            .write_stdin(plain.clone())
+            .assert()
+            .code(2);
+    }
+    assert_eq!(
+        emu.json(&["get", "users/u1"])["data"]["when"],
+        json!({"$ts": "2026-01-05T10:00:00Z"})
+    );
+}
+
+#[test]
+#[ignore = "needs FIRESTORE_EMULATOR_HOST"]
+fn a_select_projection_can_be_merged_but_not_overwritten() {
+    let emu = Emulator::project("select-guard");
+    emu.create("users/u1", &json!({"a": 1, "b": 2, "c": 3}));
+    let projected = emu.json(&["query", "users", "--select", "a,b"]);
+    assert_eq!(projected[0]["_select"], json!(["a", "b"]));
+    assert_eq!(projected[0]["data"], json!({"a": 1, "b": 2}));
+
+    // `query` prints an array; one document of it is what gets edited and written back
+    let doc = projected[0].to_string().replace(r#""a":1"#, r#""a":10"#);
+    emu.fsq(&["set", "users/u1", "--overwrite", "--data", "-"])
+        .write_stdin(doc.clone())
+        .assert()
+        .code(2);
+    assert_eq!(
+        emu.json(&["get", "users/u1"])["data"],
+        json!({"a": 1, "b": 2, "c": 3})
+    );
+
+    emu.ok_with_stdin(&["set", "users/u1", "--merge", "--data", "-"], &doc);
+    // only the selected fields changed, and `_select` was not stored as data
+    assert_eq!(
+        emu.json(&["get", "users/u1"])["data"],
+        json!({"a": 10, "b": 2, "c": 3})
+    );
+}
+
+#[test]
+#[ignore = "needs FIRESTORE_EMULATOR_HOST"]
+fn a_field_named_data_is_data_not_an_envelope() {
+    let emu = Emulator::project("field-data");
+    emu.create("users/u1", &json!({"data": {"n": 1}}));
+    assert_eq!(
+        emu.json(&["get", "users/u1"])["data"],
+        json!({"data": {"n": 1}})
+    );
+}
+
+#[test]
+#[ignore = "needs FIRESTORE_EMULATOR_HOST"]
+fn a_query_stopping_at_the_default_limit_says_so_on_stderr() {
+    let emu = Emulator::project("truncation");
+    for i in 0..100 {
+        emu.create(&format!("nums/n{i:03}"), &json!({"i": i}));
+    }
+    let note = "note: showing the first 100 documents; use --limit N or --all\n";
+    let run = |args: &[&str]| {
+        let out = emu.fsq(args).assert().success().get_output().clone();
+        (
+            String::from_utf8(out.stdout).expect("utf-8 stdout"),
+            String::from_utf8(out.stderr).expect("utf-8 stderr"),
+        )
+    };
+    let (stdout, stderr) = run(&["query", "nums"]);
+    assert_eq!(stderr, note);
+    assert_eq!(parse(&stdout).as_array().map(Vec::len), Some(100));
+    for args in [
+        &["query", "nums", "--limit", "100"][..],
+        &["query", "nums", "--all"],
+        &["query", "nums", "--limit", "5"],
+    ] {
+        assert_eq!(run(args).1, "", "{args:?}");
+    }
+    emu.create("nums/extra", &json!({"i": 100}));
+    assert_eq!(run(&["query", "nums"]).1, note);
+    assert_eq!(
+        parse(&run(&["query", "nums", "--all"]).0)
+            .as_array()
+            .map(Vec::len),
+        Some(101)
+    );
+}
+
+#[test]
+#[ignore = "needs FIRESTORE_EMULATOR_HOST"]
+fn references_into_another_database_roundtrip() {
+    let emu = Emulator::project("foreign-ref");
+    let foreign = "projects/some-other-project/databases/(default)/documents/users/u9";
+    emu.create(
+        "things/t1",
+        &json!({"mine": {"$ref": "users/u1"}, "theirs": {"$ref": foreign}}),
+    );
+    let read = emu.json(&["get", "things/t1"]);
+    assert_eq!(read["data"]["mine"], json!({"$ref": "users/u1"}));
+    assert_eq!(read["data"]["theirs"], json!({"$ref": foreign}));
+    let plain = emu.json(&["get", "things/t1", "--plain"]);
+    assert_eq!(plain["data"]["theirs"], json!(foreign));
+    emu.ok_with_stdin(
+        &["set", "things/t1", "--overwrite", "--data", "-"],
+        &read.to_string(),
+    );
+    assert_eq!(emu.json(&["get", "things/t1"])["data"], read["data"]);
 }

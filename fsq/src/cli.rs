@@ -14,13 +14,13 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use itertools::Itertools;
 use serde_json::Value as Json;
 
-use crate::app::{AppError, Request};
-use crate::codec::typed_json;
+use crate::app::{AppError, Output, Request};
+use crate::codec::typed_json::{self, Envelope, Input};
 use crate::complete::{FieldKind, collection_completer, field_completer};
 use crate::domain::{
     AggregateQuery, Aggregation, AnyPath, CollectionId, DatabaseId, DbTarget, DeleteDoc, DocPath,
-    FieldOp, FieldPath, Filter, Guard, IdError, Limit, NonEmptyVec, OrderBy, ProjectId, Query,
-    Scope, SetDoc, SetMode, UpdateDoc, UpdateTime, Write, check_field_ops,
+    FieldOp, FieldPath, Fields, Filter, Guard, IdError, Limit, NonEmptyVec, OrderBy, ProjectId,
+    Query, Scope, SetDoc, SetMode, UpdateDoc, UpdateTime, Write, check_field_ops,
 };
 use crate::parse::{parse_field, unquoted};
 use crate::render::{Format, Layout, RenderOpts, Typing};
@@ -60,20 +60,31 @@ Typed JSON (what `get`/`query` print and `set --data` reads):
   Documents are {"_path": ..., "_updateTime": ..., "data": {...}}. Values that JSON
   cannot express carry a tag:
   {"$ts": "2026-01-05T10:00:00.123456Z"}       timestamp (stored to the microsecond)
-  {"$ref": "users/u1"}                         document reference
+  {"$ref": "users/u1"}                         document reference; one in another
+                                               database is its full name,
+                                               "projects/P/databases/D/documents/users/u1"
   {"$double": 1.5}                             double ("NaN", "Infinity" as strings);
                                                a bare JSON integer is an integer
   {"$bytes": "aGk="}                           bytes (standard base64 with padding)
   {"$geo": {"lat": 1.5, "lng": -2.0}}          geo point
   {"$map": {...}}                              escape: a map whose only key starts
                                                with $ is written inside $map
-  --plain prints untagged JSON for humans and jq (not readable back losslessly).
+  --plain prints untagged JSON for humans and jq (it carries "_plain": true and `set`
+  refuses it: it cannot be read back losslessly). `query --select` documents carry
+  "_select": [...]; `set --overwrite` refuses them (they hold only some fields),
+  `set --merge` accepts them.
   `set --data` takes a bare object of fields or a whole document as printed by
   `get` (its _path must match the target); use --data @file.json or --data - (stdin).
+  A whole document is recognised by its _path or _updateTime key; any other object is
+  bare field data (so {"data": {...}} alone is a field named data). Top-level "_plain"
+  and "_select" keys are always output markers, never fields.
 
 Concurrency:
   --if-unchanged-since takes the _updateTime printed by `get`, verbatim (nanoseconds
   included). The write fails (exit 5) if the document changed or is missing.
+  `set --overwrite|--merge` with a whole document from `get` (it carries _updateTime)
+  uses that time as the guard by itself: get, edit, set fails with exit 5 if the
+  document changed meanwhile. --force skips this and writes anyway.
 
 Environment:
   FSQ_PROJECT    default for --project
@@ -88,13 +99,15 @@ Completion:
 Output:
   A table on a terminal, JSON otherwise (indented on a terminal, compact in a pipe);
   jsonl is always compact. --format, --pretty, --compact and --plain override.
+  `query` stops at 100 documents unless --limit or --all; when it returns exactly 100 by
+  default, a note on stderr says there may be more (stdout stays clean).
 
 Exit codes:
   (the process exit codes; match on these in scripts)
   0  ok
-  1  other error
+  1  other error (including a missing database or project)
   2  usage error (bad flag, path, filter, field op or --data)
-  3  not found
+  3  document not found
   4  already exists
   5  precondition failed (missing or changed since --if-unchanged-since)
   6  writes disabled for this database
@@ -401,9 +414,14 @@ pub enum Cmd {
         #[arg(long, group = "mode")]
         merge: bool,
         /// Only write if the document's _updateTime is exactly this (needs --overwrite
-        /// or --merge).
+        /// or --merge). Without it, a --data document printed by `get` guards the write
+        /// with its own _updateTime.
         #[arg(long, value_name = "UPDATE_TIME", requires = "mode")]
         if_unchanged_since: Option<UpdateTime>,
+        /// Skip the automatic guard taken from the _updateTime in --data: overwrite or
+        /// merge even if the document changed since it was read.
+        #[arg(long, requires = "mode", conflicts_with = "if_unchanged_since")]
+        force: bool,
     },
     /// Change fields of an existing document: --set field=value, field+=v, field-=v.
     #[command(after_long_help = SEE_ROOT_HELP)]
@@ -459,6 +477,38 @@ impl Cmd {
     }
 }
 
+impl Cmd {
+    /// Whether this is a `query` that took the default document limit (neither `--limit`
+    /// nor `--all`), so its result may have been cut short without the user asking.
+    #[must_use]
+    pub fn uses_default_limit(&self) -> bool {
+        matches!(
+            self,
+            Self::Query {
+                limit: None,
+                all: false,
+                ..
+            }
+        )
+    }
+}
+
+/// The stderr note for a `query` that ran with the default limit ([`Cmd::uses_default_limit`])
+/// and returned exactly that many documents, so there may be more. `None` otherwise.
+#[must_use]
+pub fn truncation_note(default_limit_used: bool, output: &Output) -> Option<String> {
+    match output {
+        Output::Documents { docs, .. }
+            if default_limit_used && docs.len() == DEFAULT_LIMIT.get() as usize =>
+        {
+            Some(format!(
+                "note: showing the first {DEFAULT_LIMIT} documents; use --limit N or --all\n"
+            ))
+        }
+        _ => None,
+    }
+}
+
 fn guard(since: Option<UpdateTime>) -> Guard {
     since.map_or(Guard::None, Guard::UnchangedSince)
 }
@@ -480,32 +530,56 @@ fn read_data(data: DataArg, mut stdin: impl Read) -> Result<String, AppError> {
     }
 }
 
-/// The fields `set --data` writes to `target`. A full document's `_path` must name
-/// the target, so data copied from another document is not written here by accident.
-fn decode_data(text: &str, target: &DocPath) -> Result<crate::domain::Fields, AppError> {
+/// A decoded `set --data`: the fields to write, and the `_updateTime` the input was
+/// read at when it is a full document.
+struct SetData {
+    fields: Fields,
+    read_at: Option<UpdateTime>,
+}
+
+/// What a printed-document marker (`_plain`, `_select`) in `set --data` means for the
+/// write about to happen.
+fn check_markers(envelope: &Envelope, merge: bool) -> Result<(), AppError> {
+    if envelope.plain {
+        Err(AppError::Input(
+            "plain output cannot be written back; use typed output (omit --plain)".to_owned(),
+        ))
+    } else if envelope.select.is_some() && !merge {
+        Err(AppError::Input(
+            "--data is a `query --select` projection holding only the selected fields; \
+             writing it without --merge would drop every other field. Use --merge to change \
+             only these fields"
+                .to_owned(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// The data `set --data` writes to `target`. A full document's `_path` must name the
+/// target, so data copied from another document is not written here by accident; its
+/// `_plain` and `_select` markers are checked against `merge` (see [`check_markers`]).
+fn decode_data(text: &str, target: &DocPath, merge: bool) -> Result<SetData, AppError> {
     let json: Json = serde_json::from_str(text)
         .map_err(|e| AppError::Input(format!("--data is not valid JSON: {e}")))?;
-    match json.get("_path") {
-        None => Ok(()),
-        Some(Json::String(p)) => p
-            .parse::<DocPath>()
-            .map_err(|e| {
-                AppError::Input(format!("_path in --data ({p}) is not a document path: {e}"))
-            })
-            .and_then(|path| {
-                if path == *target {
-                    Ok(())
-                } else {
-                    Err(AppError::Input(format!(
-                        "_path in --data ({path}) does not match target {target}"
-                    )))
-                }
-            }),
-        Some(other) => Err(AppError::Input(format!(
-            "_path in --data must be a string, got {other}"
+    let Input { fields, envelope } =
+        typed_json::parse_input(&json).map_err(|e| AppError::Input(format!("--data {e}")))?;
+    let Some(envelope) = envelope else {
+        return Ok(SetData {
+            fields,
+            read_at: None,
+        });
+    };
+    check_markers(&envelope, merge)?;
+    match envelope.path {
+        Some(path) if path != *target => Err(AppError::Input(format!(
+            "_path in --data ({path}) does not match target {target}"
         ))),
-    }?;
-    typed_json::fields_from_input(&json).map_err(|e| AppError::Input(format!("--data {e}")))
+        _ => Ok(SetData {
+            fields,
+            read_at: envelope.update_time,
+        }),
+    }
 }
 
 fn query(selection: Selection) -> Result<Query, AppError> {
@@ -547,7 +621,8 @@ impl Cli {
     ///
     /// # Errors
     /// [`AppError::Input`] for input that parses but is wrong: `--data` that is
-    /// unreadable, not JSON, not valid typed JSON or names another document, a
+    /// unreadable, not JSON, not valid typed JSON, names another document or is `--plain`
+    /// output or a `--select` projection that the write mode cannot take, a
     /// document path where a collection is needed (or the reverse), or a repeated
     /// `--sum`/`--avg` field. `completions` is not a request; callers handle it first
     /// and it yields an input error here.
@@ -586,15 +661,23 @@ impl Cli {
                 overwrite,
                 merge,
                 if_unchanged_since,
+                force,
             } => {
-                let data = read_data(data, stdin).and_then(|text| decode_data(&text, &path))?;
-                let guard = guard(if_unchanged_since);
+                let SetData { fields, read_at } =
+                    read_data(data, stdin).and_then(|text| decode_data(&text, &path, merge))?;
+                // Lost-update protection: a document read with `get` guards its own
+                // write-back unless the caller named a guard or asked to --force.
+                let guard = guard(if_unchanged_since.or(read_at.filter(|_| !force)));
                 let mode = match (overwrite, merge) {
                     (true, _) => SetMode::Overwrite(guard),
                     (_, true) => SetMode::Merge(guard),
                     _ => SetMode::Create,
                 };
-                Ok(Request::Write(Write::Set(SetDoc { path, data, mode })))
+                Ok(Request::Write(Write::Set(SetDoc {
+                    path,
+                    data: fields,
+                    mode,
+                })))
             }
             Cmd::Update {
                 path,
@@ -988,5 +1071,174 @@ mod tests {
     fn completions_is_not_a_request() {
         let cli = Cli::try_parse_from(["fsq", "completions", "bash"]).unwrap();
         assert!(matches!(cli.into_request(empty()), Err(AppError::Input(_))));
+    }
+
+    const PRINTED: &str =
+        r#"{"_path":"users/u1","_updateTime":"2026-01-05T10:00:00.123456789Z","data":{"a":1}}"#;
+
+    fn printed_with(extra: &str) -> String {
+        format!(
+            r#"{{"_path":"users/u1","_updateTime":"2026-01-05T10:00:00.123456789Z",{extra},"data":{{"a":1}}}}"#
+        )
+    }
+
+    #[test]
+    fn data_alone_is_a_field_named_data_not_an_envelope() {
+        let data = set_of(&["set", "users/u1", "--data", r#"{"data":{"a":1}}"#]).data;
+        assert_eq!(data.keys().collect_vec(), ["data"]);
+    }
+
+    #[test]
+    fn plain_output_cannot_be_written_back() {
+        let plain = printed_with(r#""_plain":true"#);
+        for mode in [&[][..], &["--overwrite"], &["--merge"]] {
+            let args = [&["set", "users/u1", "--data", &plain][..], mode].concat();
+            assert_eq!(
+                request(&args),
+                Err(AppError::Input(
+                    "plain output cannot be written back; use typed output (omit --plain)".into()
+                )),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn markers_count_even_when_path_and_update_time_were_stripped() {
+        for data in [
+            r#"{"_plain":true,"data":{"a":1}}"#,
+            r#"{"_plain":true,"a":1}"#,
+        ] {
+            assert!(
+                matches!(request(&["set", "users/u1", "--data", data, "--overwrite"]),
+                    Err(AppError::Input(m)) if m.contains("plain output")),
+                "{data}"
+            );
+        }
+        let projection = r#"{"_select":["a"],"a":1}"#;
+        assert!(matches!(
+            request(&["set", "users/u1", "--data", projection, "--overwrite"]),
+            Err(AppError::Input(m)) if m.contains("--merge")
+        ));
+        let merged = set_of(&["set", "users/u1", "--data", projection, "--merge"]);
+        assert_eq!(merged.data.keys().collect_vec(), ["a"]);
+    }
+
+    #[test]
+    fn a_select_projection_may_only_be_merged() {
+        let projection = printed_with(r#""_select":["a"]"#);
+        for mode in [&[][..], &["--overwrite"]] {
+            let args = [&["set", "users/u1", "--data", &projection][..], mode].concat();
+            assert!(
+                matches!(request(&args), Err(AppError::Input(m))
+                    if m.contains("--select") && m.contains("--merge")),
+                "{mode:?}"
+            );
+        }
+        let merged = set_of(&["set", "users/u1", "--data", &projection, "--merge"]);
+        assert_eq!(merged.data.keys().collect_vec(), ["a"]);
+        assert!(matches!(merged.mode, SetMode::Merge(_)));
+    }
+
+    #[test]
+    fn a_printed_document_guards_its_own_write_back() {
+        let t: UpdateTime = "2026-01-05T10:00:00.123456789Z".parse().unwrap();
+        let mode = |extra: &[&str]| {
+            set_of(&[&["set", "users/u1", "--data", PRINTED][..], extra].concat()).mode
+        };
+        let guarded = Guard::UnchangedSince(t);
+        assert_eq!(mode(&["--overwrite"]), SetMode::Overwrite(guarded));
+        assert_eq!(mode(&["--merge"]), SetMode::Merge(guarded));
+        // --force skips the implicit guard
+        assert_eq!(
+            mode(&["--overwrite", "--force"]),
+            SetMode::Overwrite(Guard::None)
+        );
+        assert_eq!(mode(&["--merge", "--force"]), SetMode::Merge(Guard::None));
+        // an explicit guard wins over the document's own time
+        let other: UpdateTime = "2026-02-01T00:00:00Z".parse().unwrap();
+        assert_eq!(
+            mode(&[
+                "--overwrite",
+                "--if-unchanged-since",
+                "2026-02-01T00:00:00Z"
+            ]),
+            SetMode::Overwrite(Guard::UnchangedSince(other))
+        );
+        // create has no guard
+        assert_eq!(mode(&[]), SetMode::Create);
+    }
+
+    #[test]
+    fn bare_data_has_no_implicit_guard() {
+        let bare = |extra: &str| set_of(&["set", "users/u1", "--data", r#"{"a":1}"#, extra]).mode;
+        assert_eq!(bare("--overwrite"), SetMode::Overwrite(Guard::None));
+        assert_eq!(bare("--merge"), SetMode::Merge(Guard::None));
+    }
+
+    #[test]
+    fn force_conflicts_with_an_explicit_guard_and_needs_a_mode() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(
+                ["fsq", "set", "u/1", "--data", "{}"]
+                    .into_iter()
+                    .chain(args.iter().copied()),
+            )
+        };
+        assert!(
+            parse(&[
+                "--overwrite",
+                "--force",
+                "--if-unchanged-since",
+                "2026-01-01T00:00:00Z"
+            ])
+            .is_err()
+        );
+        assert!(parse(&["--force"]).is_err());
+        assert!(parse(&["--merge", "--force"]).is_ok());
+    }
+
+    #[test]
+    fn only_a_plain_query_uses_the_default_limit() {
+        let default = |args: &[&str]| {
+            Cli::try_parse_from(
+                ["fsq", "--project", "p"]
+                    .into_iter()
+                    .chain(args.iter().copied()),
+            )
+            .unwrap()
+            .cmd
+            .uses_default_limit()
+        };
+        assert!(default(&["query", "users"]));
+        assert!(!default(&["query", "users", "--limit", "100"]));
+        assert!(!default(&["query", "users", "--all"]));
+        assert!(!default(&["get", "users/u1"]));
+        assert!(!default(&["count", "users"]));
+    }
+
+    fn documents(n: usize) -> Output {
+        let doc = |i: usize| crate::domain::Document {
+            path: format!("users/u{i}").parse().unwrap(),
+            update_time: "2026-01-01T00:00:00Z".parse().unwrap(),
+            data: Fields::new(),
+        };
+        Output::Documents {
+            docs: (0..n).map(doc).collect(),
+            select: None,
+        }
+    }
+
+    #[test]
+    fn a_default_limited_query_that_filled_the_limit_says_so() {
+        assert_eq!(
+            truncation_note(true, &documents(100)),
+            Some("note: showing the first 100 documents; use --limit N or --all\n".to_owned())
+        );
+        // not at the limit, an explicit limit, or not a query: no note
+        assert_eq!(truncation_note(true, &documents(99)), None);
+        assert_eq!(truncation_note(true, &documents(0)), None);
+        assert_eq!(truncation_note(false, &documents(100)), None);
+        assert_eq!(truncation_note(true, &Output::Collections(vec![])), None);
     }
 }

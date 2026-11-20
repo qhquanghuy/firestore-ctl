@@ -22,18 +22,22 @@ pub fn value_to_json(v: &Value) -> Json {
         Value::Timestamp(t) => Json::String(t.to_string()),
         Value::Bytes(b) => Json::String(STANDARD.encode(b)),
         Value::Ref(p) => Json::String(p.to_string()),
+        Value::ForeignRef(n) => Json::String(n.to_string()),
         Value::Geo(g) => json!({"lat": double_json(g.lat()), "lng": double_json(g.lng())}),
         Value::Array(xs) => Json::Array(xs.iter().map(value_to_json).collect()),
         Value::Map(m) => Json::Object(fields_to_object(m, value_to_json)),
     }
 }
 
-/// Renders a document as `{"_path", "_updateTime", "data"}` with untagged data.
+/// Renders a document as `{"_path", "_updateTime", "data", "_plain": true}` with
+/// untagged data. The `_plain` marker makes `set --data` refuse the output: untagged
+/// values are lossy (a timestamp would be written back as a string).
 #[must_use]
 pub fn document_to_json(d: &Document) -> Json {
     json!({
         "_path": d.path.to_string(),
         "_updateTime": d.update_time.to_string(),
+        "_plain": true,
         "data": Json::Object(fields_to_object(&d.data, value_to_json)),
     })
 }

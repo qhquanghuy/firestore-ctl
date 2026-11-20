@@ -26,7 +26,8 @@ use crate::domain::{
 };
 use crate::port::GatewayError;
 
-/// A domain value as a proto value; references become full resource names in `t`.
+/// A domain value as a proto value; relative references become full resource names in `t`,
+/// and a foreign reference is written verbatim.
 pub fn value(v: &Value, t: &DbTarget) -> proto::Value {
     let value_type = match v {
         Value::Null => ValueType::NullValue(prost_types::NullValue::NullValue as i32),
@@ -37,6 +38,7 @@ pub fn value(v: &Value, t: &DbTarget) -> proto::Value {
         Value::Timestamp(ts) => ValueType::TimestampValue(timestamp(*ts)),
         Value::Bytes(b) => ValueType::BytesValue(b.clone()),
         Value::Ref(p) => ValueType::ReferenceValue(doc_name(p, t)),
+        Value::ForeignRef(name) => ValueType::ReferenceValue(name.as_str().to_owned()),
         Value::Geo(g) => ValueType::GeoPointValue(gcloud_sdk::google::r#type::LatLng {
             latitude: g.lat(),
             longitude: g.lng(),

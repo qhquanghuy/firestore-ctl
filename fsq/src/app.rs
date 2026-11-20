@@ -3,8 +3,8 @@
 use thiserror::Error;
 
 use crate::domain::{
-    AggregateQuery, CollectionId, DbTarget, DocPath, Document, IndexAdvice, Query, Write,
-    required_index,
+    AggregateQuery, Aggregation, CollectionId, DbTarget, DocPath, Document, FieldPath, IndexAdvice,
+    Query, Write, required_index,
 };
 use crate::policy::{PolicyError, WriteAccess, WriteDenied, WritePolicy};
 use crate::port::{AggregateResult, Firestore, GatewayError, IndexInfo, Written};
@@ -31,8 +31,13 @@ pub enum Request {
 pub enum Output {
     /// A single document.
     Document(Document),
-    /// Query results.
-    Documents(Vec<Document>),
+    /// Query results, with the projection the query applied (`--select`), if any.
+    Documents {
+        /// The matching documents.
+        docs: Vec<Document>,
+        /// The selected field paths; the documents hold only these fields.
+        select: Option<Vec<FieldPath>>,
+    },
     /// Aggregate values.
     Aggregate(AggregateResult),
     /// Collection names.
@@ -148,13 +153,16 @@ pub async fn run<F: Firestore>(fs: &F, req: Authorized) -> Result<Output, AppErr
         Cleared::Query(q) => fs
             .query(&q)
             .await
-            .map(Output::Documents)
-            .map_err(|e| index_error(e, &q)),
+            .map(|docs| Output::Documents {
+                docs,
+                select: q.select.clone(),
+            })
+            .map_err(|e| index_error(e, || required_index(&q))),
         Cleared::Aggregate(a) => fs
             .aggregate(&a)
             .await
             .map(Output::Aggregate)
-            .map_err(|e| index_error(e, &a.query)),
+            .map_err(|e| index_error(e, || aggregate_advice(&a))),
         Cleared::Collections(parent) => fs
             .list_collections(parent.as_ref())
             .await
@@ -168,13 +176,25 @@ pub async fn run<F: Firestore>(fs: &F, req: Authorized) -> Result<Output, AppErr
     }
 }
 
-/// Turns a gateway's missing-index failure into advice for the query `q`.
-fn index_error(e: GatewayError, q: &Query) -> AppError {
+/// Turns a gateway's missing-index failure into an [`AppError::MissingIndex`] carrying
+/// the `advice` computed on demand.
+fn index_error(e: GatewayError, advice: impl FnOnce() -> Option<IndexAdvice>) -> AppError {
     match e {
         GatewayError::MissingIndex { console_url } => AppError::MissingIndex {
-            advice: required_index(q),
+            advice: advice(),
             console_url,
         },
         other => AppError::Gateway(other),
     }
+}
+
+/// The index advice for an aggregate query: only for a plain `count`. A `sum` or `avg`
+/// is served by an index that also covers the aggregated field, which the advice for the
+/// filter and order fields alone would leave out, so those get the console link only.
+fn aggregate_advice(a: &AggregateQuery) -> Option<IndexAdvice> {
+    a.aggregations
+        .iter()
+        .all(|aggregation| matches!(aggregation, Aggregation::Count))
+        .then(|| required_index(&a.query))
+        .flatten()
 }

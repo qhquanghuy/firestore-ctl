@@ -1,5 +1,5 @@
 //! Firestore protos to domain types. Pure; anything this program cannot represent
-//! (another database's reference, pipeline-only values) is an error, never a guess. The
+//! (pipeline-only values, a malformed reference) is an error, never a guess. The
 //! one exception is [`index`]: listing indexes skips those the domain cannot express.
 
 use std::collections::HashMap;
@@ -13,7 +13,7 @@ use gcloud_sdk::prost_types;
 
 use crate::domain::{
     CollectionId, DbTarget, DocPath, Document, FieldPath, Fields, GeoPoint, IndexField, IndexMode,
-    IndexSpec, NonEmptyVec, QueryScope, Timestamp, UpdateTime, Value,
+    IndexSpec, NonEmptyVec, QueryScope, ResourceNameError, Timestamp, UpdateTime, Value,
 };
 use crate::port::{GatewayError, IndexInfo, IndexState};
 
@@ -73,11 +73,12 @@ fn timestamp(ts: &prost_types::Timestamp) -> Result<Timestamp, GatewayError> {
         })
 }
 
-/// A value read from `t`; references must point into `t`.
+/// A value read from `t`. A reference into `t` is a relative [`Value::Ref`]; one into
+/// another database or project is a [`Value::ForeignRef`] holding its full name.
 ///
 /// # Errors
-/// [`GatewayError::Other`] for a value that is absent, out of range, a reference into
-/// another database, or of a pipeline-only kind.
+/// [`GatewayError::Other`] for a value that is absent, out of range, a malformed
+/// reference, or of a pipeline-only kind.
 pub fn value(v: proto::Value, t: &DbTarget) -> Result<Value, GatewayError> {
     match v.value_type {
         Some(ValueType::NullValue(_)) => Ok(Value::Null),
@@ -87,7 +88,7 @@ pub fn value(v: proto::Value, t: &DbTarget) -> Result<Value, GatewayError> {
         Some(ValueType::TimestampValue(ts)) => timestamp(&ts).map(Value::Timestamp),
         Some(ValueType::StringValue(s)) => Ok(Value::String(s)),
         Some(ValueType::BytesValue(b)) => Ok(Value::Bytes(b)),
-        Some(ValueType::ReferenceValue(name)) => doc_path(&name, t).map(Value::Ref),
+        Some(ValueType::ReferenceValue(name)) => reference(&name, t),
         Some(ValueType::GeoPointValue(g)) => GeoPoint::new(g.latitude, g.longitude)
             .map(Value::Geo)
             .map_err(|e| other(format!("invalid geo point: {e}"))),
@@ -105,6 +106,17 @@ pub fn value(v: proto::Value, t: &DbTarget) -> Result<Value, GatewayError> {
             | ValueType::PipelineValue(_),
         ) => Err(other("the document holds a pipeline-only value type")),
         None => Err(other("the document holds a value with no type")),
+    }
+}
+
+/// The reference `name`: relative when it lies in `t`, otherwise kept as a full name.
+fn reference(name: &str, t: &DbTarget) -> Result<Value, GatewayError> {
+    if name.starts_with(&format!("{}/", t.documents_root())) {
+        doc_path(name, t).map(Value::Ref)
+    } else {
+        name.parse()
+            .map(Value::ForeignRef)
+            .map_err(|e: ResourceNameError| other(e.to_string()))
     }
 }
 
@@ -195,6 +207,11 @@ mod tests {
             Value::Timestamp(ts),
             Value::Bytes(vec![0, 1, 255]),
             Value::Ref(doc("users/u2/orders/o1")),
+            Value::ForeignRef(
+                "projects/q/databases/(default)/documents/users/u9"
+                    .parse()
+                    .unwrap(),
+            ),
             Value::Geo(GeoPoint::new(35.5, 139.7).unwrap()),
             Value::Array(vec![Value::Int(1), Value::Array(vec![]), Value::Null]),
             Value::Map(BTreeMap::from([
@@ -214,16 +231,50 @@ mod tests {
     }
 
     #[test]
-    fn reference_into_another_database_is_an_error() {
+    fn references_outside_the_database_become_foreign_refs() {
         let ours = target("p", "d");
-        let theirs = target("p", "d2");
-        let foreign = to_proto::value(&Value::Ref(doc("users/u1")), &theirs);
-        assert!(matches!(value(foreign, &ours), Err(GatewayError::Other(_))));
-        let other_project = to_proto::value(&Value::Ref(doc("users/u1")), &target("q", "d"));
-        assert!(matches!(
-            value(other_project, &ours),
-            Err(GatewayError::Other(_))
-        ));
+        for other_db in [target("p", "d2"), target("q", "d")] {
+            let foreign = to_proto::value(&Value::Ref(doc("users/u1")), &other_db);
+            let name = format!("{}/users/u1", other_db.documents_root());
+            assert_eq!(
+                value(foreign, &ours),
+                Ok(Value::ForeignRef(name.parse().unwrap()))
+            );
+        }
+        // a sibling database whose name merely starts with ours is still foreign
+        let sibling = to_proto::value(&Value::Ref(doc("a/b")), &target("p", "d-2"));
+        assert!(matches!(value(sibling, &ours), Ok(Value::ForeignRef(_))));
+    }
+
+    #[test]
+    fn foreign_refs_roundtrip_and_are_written_verbatim() {
+        let t = target("p", "d");
+        let name = "projects/q/databases/(default)/documents/users/u1/orders/o1";
+        let v = Value::ForeignRef(name.parse().unwrap());
+        let proto = to_proto::value(&v, &t);
+        assert_eq!(
+            proto.value_type,
+            Some(ValueType::ReferenceValue(name.to_owned()))
+        );
+        assert_eq!(value(proto, &t), Ok(v));
+    }
+
+    #[test]
+    fn a_malformed_reference_is_an_error() {
+        let t = target("p", "d");
+        for name in [
+            "users/u1",
+            "projects/q/databases/d",
+            "projects/q/databases/d/documents/users",
+        ] {
+            let bad = proto::Value {
+                value_type: Some(ValueType::ReferenceValue(name.to_owned())),
+            };
+            assert!(
+                matches!(value(bad, &t), Err(GatewayError::Other(_))),
+                "{name}"
+            );
+        }
     }
 
     #[test]

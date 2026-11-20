@@ -7,6 +7,7 @@
 use serde_json::Number;
 use thiserror::Error;
 
+use crate::domain::field::FieldPath;
 use crate::domain::value::{Fields, Value};
 
 pub mod plain_json;
@@ -37,6 +38,25 @@ fn fields_to_object(
     encode: fn(&Value) -> serde_json::Value,
 ) -> serde_json::Map<String, serde_json::Value> {
     fields.iter().map(|(k, v)| (k.clone(), encode(v))).collect()
+}
+
+/// Marks a printed document as a `--select` projection with the top-level
+/// `"_select": [<field paths as printed>]`; `set --overwrite` refuses such input because
+/// it holds only some of the document's fields.
+#[must_use]
+pub fn mark_selected(document: serde_json::Value, select: &[FieldPath]) -> serde_json::Value {
+    match document {
+        serde_json::Value::Object(object) => serde_json::Value::Object(
+            object
+                .into_iter()
+                .chain([(
+                    "_select".to_owned(),
+                    select.iter().map(ToString::to_string).collect(),
+                )])
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 /// A finite double as a JSON number; NaN and infinities as the strings
@@ -86,6 +106,11 @@ mod tests {
         }
     }
 
+    /// The fields `set --data` would write for `j`.
+    fn fields_from_input(j: &serde_json::Value) -> Result<Fields, super::CodecError> {
+        typed_json::parse_input(j).map(|input| input.fields)
+    }
+
     /// Text boundary: what `get` prints and `set --data` parses.
     fn through_text(v: &Value) -> Result<Value, super::CodecError> {
         let text = typed_json::value_to_json(v).to_string();
@@ -126,17 +151,14 @@ mod tests {
     #[test]
     fn input_accepts_bare_data_or_full_document() {
         let full = typed_json::document_to_json(&sample_doc("2026-11-20T00:00:00Z"));
-        assert_eq!(
-            typed_json::fields_from_input(&full),
-            typed_json::fields_from_input(&full["data"])
-        );
+        assert_eq!(fields_from_input(&full), fields_from_input(&full["data"]));
     }
 
     #[test]
     fn user_field_named_path_does_not_collide() {
-        let j = json!({"_path": "x", "data": {"_path": "mine"}});
+        let j = json!({"_path": "teams/t1", "data": {"_path": "mine"}});
         assert_eq!(
-            typed_json::fields_from_input(&j).unwrap()["_path"],
+            fields_from_input(&j).unwrap()["_path"],
             Value::String("mine".into())
         );
     }
@@ -223,17 +245,19 @@ mod tests {
     #[test]
     fn full_document_detection_is_strict() {
         // _updateTime alone marks a full document; a missing _path is not a flip to bare data
-        let ok = typed_json::fields_from_input(
-            &json!({"_updateTime": "2026-01-01T00:00:00Z", "data": {"a": 1}}),
-        );
+        let ok =
+            fields_from_input(&json!({"_updateTime": "2026-01-01T00:00:00Z", "data": {"a": 1}}));
         assert_eq!(ok.unwrap()["a"], Value::Int(1));
-        // data as the only key is a full document
-        assert!(typed_json::fields_from_input(&json!({"data": {"a": 1}})).is_ok());
+        // `data` alone is NOT an envelope: it is a field named data
+        let field_named_data = fields_from_input(&json!({"data": {"a": 1}})).unwrap();
+        assert_eq!(field_named_data.len(), 1);
         assert_eq!(
-            typed_json::fields_from_input(&json!({"data": 5}))
-                .unwrap_err()
-                .at,
-            "/data"
+            field_named_data["data"],
+            Value::Map([("a".to_owned(), Value::Int(1))].into_iter().collect())
+        );
+        assert_eq!(
+            fields_from_input(&json!({"data": 5})).unwrap()["data"],
+            Value::Int(5)
         );
         // stray keys are errors, never dropped
         for j in [
@@ -241,7 +265,7 @@ mod tests {
             json!({"_path": "teams/t1", "extra": 1}),
             json!({"_updateTime": "2026-01-01T00:00:00Z", "extra": {}, "data": {}}),
         ] {
-            let e = typed_json::fields_from_input(&j).unwrap_err();
+            let e = fields_from_input(&j).unwrap_err();
             assert_eq!(e.at, "/extra", "{j}");
             assert!(
                 e.reason.contains("extra") && e.reason.contains("inside `data`"),
@@ -251,14 +275,132 @@ mod tests {
         }
         // a full document without data is an error
         assert_eq!(
-            typed_json::fields_from_input(&json!({"_path": "teams/t1"}))
+            fields_from_input(&json!({"_path": "teams/t1"}))
                 .unwrap_err()
                 .at,
             "/data"
         );
         // otherwise it is bare data, keys kept literally
-        let bare = typed_json::fields_from_input(&json!({"data": 5, "other": 6})).unwrap();
+        let bare = fields_from_input(&json!({"data": 5, "other": 6})).unwrap();
         assert_eq!(bare.len(), 2);
+    }
+
+    #[test]
+    fn parse_input_reports_the_envelope_of_a_full_document() {
+        let t: UpdateTime = "2026-01-05T10:00:00.123456789Z".parse().unwrap();
+        let input = typed_json::parse_input(&json!({
+            "_path": "teams/t1",
+            "_updateTime": "2026-01-05T10:00:00.123456789Z",
+            "data": {"a": 1}
+        }))
+        .unwrap();
+        let envelope = input.envelope.unwrap();
+        assert_eq!(envelope.path, Some("teams/t1".parse().unwrap()));
+        assert_eq!(envelope.update_time, Some(t));
+        assert_eq!((envelope.plain, envelope.select), (false, None));
+        assert!(
+            typed_json::parse_input(&json!({"a": 1}))
+                .unwrap()
+                .envelope
+                .is_none()
+        );
+        for (j, at) in [
+            (json!({"_path": 7, "data": {}}), "/_path"),
+            (json!({"_path": "teams", "data": {}}), "/_path"),
+            (
+                json!({"_updateTime": "yesterday", "data": {}}),
+                "/_updateTime",
+            ),
+            (
+                json!({"_updateTime": "2026-01-01T00:00:00Z", "_select": 1, "data": {}}),
+                "/_select",
+            ),
+            (
+                json!({"_updateTime": "2026-01-01T00:00:00Z", "_select": [3], "data": {}}),
+                "/_select/0",
+            ),
+        ] {
+            assert_eq!(typed_json::parse_input(&j).unwrap_err().at, at, "{j}");
+        }
+    }
+
+    #[test]
+    fn output_markers_are_envelope_not_data() {
+        let input = typed_json::parse_input(&json!({
+            "_path": "teams/t1",
+            "_updateTime": "2026-01-01T00:00:00Z",
+            "_plain": true,
+            "_select": ["a", "`b c`.d"],
+            "data": {"a": 1}
+        }))
+        .unwrap();
+        let envelope = input.envelope.unwrap();
+        assert!(envelope.plain);
+        assert_eq!(
+            envelope.select,
+            Some(vec!["a".parse().unwrap(), "`b c`.d".parse().unwrap()])
+        );
+        assert_eq!(input.fields.keys().collect::<Vec<_>>(), ["a"]);
+    }
+
+    #[test]
+    fn markers_are_reserved_even_without_a_path_or_update_time() {
+        // `jq 'del(._path, ._updateTime)'` of printed output still says where it came from
+        let stripped = typed_json::parse_input(&json!({
+            "_plain": true,
+            "_select": ["a"],
+            "data": {"a": 1}
+        }))
+        .unwrap();
+        let envelope = stripped.envelope.unwrap();
+        assert!(envelope.plain);
+        assert_eq!(envelope.select.map(|s| s.len()), Some(1));
+        assert_eq!(envelope.path, None);
+        // never stored as data: only the sibling `data` field is left
+        assert_eq!(stripped.fields.keys().collect::<Vec<_>>(), ["data"]);
+        // unmarked bare data has no envelope at all
+        assert_eq!(
+            typed_json::parse_input(&json!({"a": 1})).unwrap().envelope,
+            None
+        );
+    }
+
+    #[test]
+    fn plain_documents_say_so_and_selected_ones_list_their_fields() {
+        let doc = sample_doc("2026-11-20T00:00:00Z");
+        assert_eq!(plain_json::document_to_json(&doc)["_plain"], json!(true));
+        assert!(typed_json::document_to_json(&doc).get("_plain").is_none());
+        let marked = super::mark_selected(
+            typed_json::document_to_json(&doc),
+            &["name".parse().unwrap(), "a.`b c`".parse().unwrap()],
+        );
+        assert_eq!(marked["_select"], json!(["name", "a.`b c`"]));
+        // a marked printout reads back as a projection of the same fields
+        let read = typed_json::parse_input(&marked).unwrap();
+        assert_eq!(read.fields, doc.data);
+        assert_eq!(read.envelope.unwrap().select.map(|s| s.len()), Some(2));
+    }
+
+    const FOREIGN: &str = "projects/other/databases/(default)/documents/users/u1";
+
+    #[test]
+    fn foreign_references_roundtrip_through_typed_json() {
+        let v = Value::ForeignRef(FOREIGN.parse().unwrap());
+        assert_eq!(typed_json::value_to_json(&v), json!({"$ref": FOREIGN}));
+        assert_eq!(through_text(&v), Ok(v));
+        assert_eq!(
+            typed_json::value_from_json(&json!({"$ref": "users/u1"})),
+            Ok(Value::Ref("users/u1".parse().unwrap()))
+        );
+    }
+
+    #[test]
+    fn ref_to_a_collection_named_projects_stays_relative() {
+        for rel in ["projects/p1", "projects/p/databases/d/documents/c"] {
+            let v = Value::Ref(rel.parse().unwrap());
+            assert_eq!(through_text(&v), Ok(v), "{rel}");
+        }
+        assert!(typed_json::value_from_json(&json!({"$ref": "projects/p/x"})).is_err());
     }
 
     #[test]
@@ -334,23 +476,21 @@ mod tests {
     fn document_with_field_named_like_a_tag_roundtrips() {
         let doc = sample_doc_with("$ts", Value::Int(7));
         let j = typed_json::document_to_json(&doc);
-        assert_eq!(typed_json::fields_from_input(&j), Ok(doc.data));
+        assert_eq!(fields_from_input(&j), Ok(doc.data));
     }
 
     #[test]
     fn errors_carry_json_pointers() {
         let e = typed_json::value_from_json(&json!({"a": [1, {"$ts": "nope"}]})).unwrap_err();
         assert_eq!(e.at, "/a/1");
-        let e = typed_json::fields_from_input(
-            &json!({"_path": "x", "data": {"createdAt": {"$ts": 1}}}),
-        )
-        .unwrap_err();
+        let e = fields_from_input(&json!({"_path": "teams/t1", "data": {"createdAt": {"$ts": 1}}}))
+            .unwrap_err();
         assert_eq!(e.at, "/data/createdAt");
-        let e = typed_json::fields_from_input(&json!({"_path": "x", "data": 3})).unwrap_err();
+        let e = fields_from_input(&json!({"_path": "teams/t1", "data": 3})).unwrap_err();
         assert_eq!(e.at, "/data");
-        let e = typed_json::fields_from_input(&json!([1])).unwrap_err();
+        let e = fields_from_input(&json!([1])).unwrap_err();
         assert_eq!(e.at, "");
-        let e = typed_json::fields_from_input(&json!({"a/b~c": {"$nope": 1}})).unwrap_err();
+        let e = fields_from_input(&json!({"a/b~c": {"$nope": 1}})).unwrap_err();
         assert_eq!(e.at, "/a~1b~0c");
     }
 
