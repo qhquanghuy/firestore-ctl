@@ -117,28 +117,6 @@ fn write_denied_uses_env_project_and_database() {
 }
 
 #[test]
-fn bad_writable_env_is_reported_and_exits_1() {
-    fsq()
-        .env("FSQ_WRITABLE", "*")
-        .args(["--project", "p", "get", "users/u1"])
-        .assert()
-        .code(1)
-        .stderr(contains("wildcards"));
-}
-
-// TEMPORARY: pinned to the connection stub ("not implemented"); Task 9 must replace this
-// with a test that does not reach the network.
-#[test]
-fn allowed_write_passes_authorization_then_fails_at_the_stub() {
-    fsq()
-        .env("FSQ_WRITABLE", "p/d")
-        .args(["--project", "p", "--database", "d", "delete", "users/u1"])
-        .assert()
-        .code(1)
-        .stderr(contains("not implemented"));
-}
-
-#[test]
 fn overwrite_and_merge_conflict() {
     fsq()
         .args([
@@ -191,9 +169,12 @@ fn update_requires_a_change() {
 #[test]
 fn set_data_path_mismatch_is_an_input_error() {
     fsq()
+        .env("FSQ_WRITABLE", "p/d")
         .args([
             "--project",
             "p",
+            "--database",
+            "d",
             "set",
             "users/u1",
             "--overwrite",
@@ -208,9 +189,12 @@ fn set_data_path_mismatch_is_an_input_error() {
 #[test]
 fn set_data_decode_error_names_the_pointer() {
     fsq()
+        .env("FSQ_WRITABLE", "p/d")
         .args([
             "--project",
             "p",
+            "--database",
+            "d",
             "set",
             "users/u1",
             "--data",
@@ -224,7 +208,17 @@ fn set_data_decode_error_names_the_pointer() {
 #[test]
 fn set_data_invalid_json_is_an_input_error() {
     fsq()
-        .args(["--project", "p", "set", "users/u1", "--data", "{nope"])
+        .env("FSQ_WRITABLE", "p/d")
+        .args([
+            "--project",
+            "p",
+            "--database",
+            "d",
+            "set",
+            "users/u1",
+            "--data",
+            "{nope",
+        ])
         .assert()
         .code(2)
         .stderr(contains("--data"));
@@ -262,13 +256,163 @@ fn completions_work_without_a_project() {
         .stdout(contains("fsq"));
 }
 
-// TEMPORARY: pinned to the connection stub ("not implemented"); Task 9 must replace this
-// with a test that does not reach the network.
 #[test]
-fn read_hits_the_stub_after_authorization() {
+fn malformed_writable_fails_writes_with_exit_1() {
     fsq()
-        .args(["--project", "p", "get", "users/u1"])
+        .env("FSQ_WRITABLE", "*")
+        .args(["--project", "p", "delete", "users/u1"])
         .assert()
         .code(1)
-        .stderr("not implemented\n");
+        .stderr(contains("wildcards"));
+}
+
+#[test]
+fn malformed_writable_does_not_block_reads() {
+    // `query` on a document path is rejected while building the request (exit 2),
+    // which is only reached if the policy error did not stop the command (exit 1).
+    fsq()
+        .env("FSQ_WRITABLE", "*")
+        .args(["--project", "p", "query", "users/u1"])
+        .assert()
+        .code(2)
+        .stderr(contains("document path"));
+}
+
+#[test]
+fn denied_write_does_not_read_a_file() {
+    fsq()
+        .args([
+            "--project",
+            "p",
+            "--database",
+            "d",
+            "set",
+            "users/u1",
+            "--data",
+            "@/nonexistent/fsq-data.json",
+        ])
+        .assert()
+        .code(6)
+        .stderr("writes are disabled for database p/d\n");
+}
+
+#[test]
+fn denied_write_does_not_read_stdin() {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("fsq"))
+        .env_remove("FSQ_WRITABLE")
+        .args([
+            "--project",
+            "p",
+            "--database",
+            "d",
+            "set",
+            "users/u1",
+            "--data",
+            "-",
+        ])
+        .stdin(Stdio::piped()) // held open and never written: a read would block
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if Instant::now() > deadline {
+            child.kill().unwrap();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.and_then(|s| s.code()), Some(6), "blocked on stdin?");
+}
+
+#[test]
+fn empty_project_env_counts_as_unset() {
+    fsq()
+        .env("FSQ_PROJECT", "")
+        .args(["completions", "bash"])
+        .assert()
+        .success();
+    fsq()
+        .env("FSQ_PROJECT", "")
+        .args(["get", "users/u1"])
+        .assert()
+        .code(2)
+        .stderr(contains("--project"));
+}
+
+#[test]
+fn empty_database_env_means_default() {
+    fsq()
+        .env("FSQ_DATABASE", "")
+        .args(["--project", "p", "delete", "users/u1"])
+        .assert()
+        .code(6)
+        .stderr("writes are disabled for database p/(default)\n");
+}
+
+#[test]
+fn invalid_database_env_is_a_usage_error() {
+    fsq()
+        .env("FSQ_DATABASE", "Bad Name")
+        .args(["--project", "p", "get", "users/u1"])
+        .assert()
+        .code(2)
+        .stderr(contains("FSQ_DATABASE"));
+}
+
+#[test]
+fn allowed_write_passes_authorization() {
+    // Past the policy gate the request is built; the bad --data is then an input
+    // error (exit 2), not a denial (exit 6).
+    fsq()
+        .env("FSQ_WRITABLE", "p/d")
+        .args([
+            "--project",
+            "p",
+            "--database",
+            "d",
+            "set",
+            "users/u1",
+            "--data",
+            "{nope",
+        ])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn subcommand_help_is_self_sufficient() {
+    fsq().args(["query", "--help"]).assert().success().stdout(
+        contains("array-contains-any")
+            .and(contains("<field> <op> <value>"))
+            .and(contains("fsq --help")),
+    );
+    fsq().args(["update", "--help"]).assert().success().stdout(
+        contains("ARRAY-UNION")
+            .and(contains("ARRAY-REMOVE"))
+            .and(contains("fsq --help")),
+    );
+    for sub in ["get", "count", "collections", "indexes", "set", "delete"] {
+        fsq()
+            .args([sub, "--help"])
+            .assert()
+            .success()
+            .stdout(contains("run `fsq --help`"));
+    }
+}
+
+#[test]
+fn global_flags_have_their_own_help_section() {
+    fsq()
+        .args(["get", "--help"])
+        .assert()
+        .success()
+        .stdout(contains("Global options:"));
 }

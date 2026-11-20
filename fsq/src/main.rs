@@ -8,10 +8,31 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use fsq::app::{self, AppError, Context};
 use fsq::cli::{Cli, Cmd};
+use fsq::domain::DbTarget;
 use fsq::exit::exit_code;
 use fsq::grpc;
-use fsq::policy::WritePolicy;
+use fsq::policy::{PolicyError, WritePolicy};
+use fsq::port::GatewayError;
 use fsq::render::{render, render_error};
+
+/// Prints `e` to stderr and returns its exit code.
+fn fail(e: &AppError, target: &DbTarget) -> ExitCode {
+    eprint!("{}", render_error(e, target));
+    exit_code(e)
+}
+
+/// The policy a command runs under. A malformed `FSQ_WRITABLE` only matters to writes:
+/// they fail with it, while reads (which need no policy) go ahead read-only.
+fn effective_policy(
+    parsed: Result<WritePolicy, PolicyError>,
+    is_write: bool,
+) -> Result<WritePolicy, AppError> {
+    match (parsed, is_write) {
+        (Ok(policy), _) => Ok(policy),
+        (Err(e), true) => Err(AppError::Gateway(GatewayError::Other(e.to_string()))),
+        (Err(_), false) => Ok(WritePolicy::default()),
+    }
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
@@ -22,27 +43,32 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let Some(target) = cli.conn.target() else {
-        Cli::command()
+    let target = match cli.conn.target(|name| std::env::var(name).ok()) {
+        Ok(Some(target)) => target,
+        Ok(None) => Cli::command()
             .error(
                 ErrorKind::MissingRequiredArgument,
                 "the following required argument was not provided: --project <PROJECT> (or set FSQ_PROJECT)",
             )
-            .exit()
+            .exit(),
+        Err(message) => Cli::command().error(ErrorKind::InvalidValue, message).exit(),
     };
     let opts = cli.out.render_opts(io::stdout().is_terminal());
 
-    let policy = match WritePolicy::from_env_value(std::env::var("FSQ_WRITABLE").ok().as_deref()) {
-        Ok(policy) => policy,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::from(1);
-        }
+    let is_write = cli.cmd.is_write();
+    let parsed = WritePolicy::from_env_value(std::env::var("FSQ_WRITABLE").ok().as_deref());
+    let ctx = match effective_policy(parsed, is_write) {
+        Ok(policy) => Context {
+            target: target.clone(),
+            policy,
+        },
+        Err(e) => return fail(&e, &target),
     };
-    let ctx = Context {
-        target: target.clone(),
-        policy,
-    };
+
+    // A denied write must fail before `--data` is read from stdin or a file.
+    if is_write && let Err(denied) = ctx.policy.authorize(&ctx.target) {
+        return fail(&AppError::WritesDisabled(denied), &target);
+    }
 
     let outcome = async {
         let request = cli.into_request(io::stdin().lock())?;
@@ -62,9 +88,6 @@ async fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
-        Err(e) => {
-            eprint!("{}", render_error(&e, &target));
-            exit_code(&e)
-        }
+        Err(e) => fail(&e, &target),
     }
 }

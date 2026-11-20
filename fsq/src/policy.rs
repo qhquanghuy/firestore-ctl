@@ -73,8 +73,8 @@ impl FromStr for WritableEntry {
     }
 }
 
-/// The databases writes are allowed on. Empty means read-only.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The databases writes are allowed on. Empty (the default) means read-only.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WritePolicy(Vec<WritableEntry>);
 
 impl WritePolicy {

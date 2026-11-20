@@ -19,8 +19,8 @@ use crate::app::{AppError, Request};
 use crate::codec::typed_json;
 use crate::domain::{
     AggregateQuery, Aggregation, AnyPath, CollectionId, DatabaseId, DbTarget, DeleteDoc, DocPath,
-    FieldOp, FieldPath, Filter, Guard, Limit, NonEmptyVec, OrderBy, ProjectId, Query, Scope,
-    SetDoc, SetMode, UpdateDoc, UpdateTime, Write,
+    FieldOp, FieldPath, Filter, Guard, IdError, Limit, NonEmptyVec, OrderBy, ProjectId, Query,
+    Scope, SetDoc, SetMode, UpdateDoc, UpdateTime, Write,
 };
 use crate::parse::{parse_field, unquoted};
 use crate::render::{Format, Layout, RenderOpts, Typing};
@@ -28,7 +28,11 @@ use crate::render::{Format, Layout, RenderOpts, Typing};
 /// `query` returns at most this many documents unless `--limit` or `--all` says otherwise.
 const DEFAULT_LIMIT: NonZeroU32 = NonZeroU32::new(100).unwrap();
 
-const LONG_HELP: &str = r#"VALUES (--where, --set, lists)
+/// Pointer from every subcommand's `--help` to the full reference in `fsq --help`.
+const SEE_ROOT_HELP: &str =
+    "Value syntax, field quoting, typed JSON tags and exit codes: run `fsq --help`.";
+
+const LONG_HELP: &str = r#"Values (--where, --set, lists):
   null  true  false     literals
   18  -3  1.5           numbers (integer or float)
   "text"                quoted string; escapes are \" and \\ only
@@ -40,19 +44,19 @@ const LONG_HELP: &str = r#"VALUES (--where, --set, lists)
   A whole filter is one shell argument:  --where 'name == "John Smith"'
   Operators: == != < <= > >= in not-in array-contains array-contains-any
 
-field names:
+Field names:
   Dots separate nested fields: address.city. Wrap a name containing spaces or
   punctuation (- + = : < > ! . whitespace) in backticks: `my-field`, `a b`.c
   A literal backtick or backslash inside backticks is escaped with a backslash.
 
-updating fields (update --set):
+Updating fields (update --set):
   field=value    set the field
   field+=v       ARRAY-UNION: add v (or each element of [a, b]) if not already present
   field-=v       ARRAY-REMOVE: remove every occurrence of v (or of each element)
   Both += and -= work on arrays only. They are not numeric increment or decrement,
   and applied to a field that is not an array they replace it with an array.
 
-typed json (what `get`/`query` print and `set --data` reads):
+Typed JSON (what `get`/`query` print and `set --data` reads):
   Documents are {"_path": ..., "_updateTime": ..., "data": {...}}. Values that JSON
   cannot express carry a tag:
   {"$ts": "2026-01-05T10:00:00.123456789Z"}   timestamp
@@ -67,20 +71,21 @@ typed json (what `get`/`query` print and `set --data` reads):
   `set --data` takes a bare object of fields or a whole document as printed by
   `get` (its _path must match the target); use --data @file.json or --data - (stdin).
 
-concurrency:
+Concurrency:
   --if-unchanged-since takes the _updateTime printed by `get`, verbatim. The write
   fails (exit 5) if the document changed or is missing.
 
-environment:
+Environment:
   FSQ_PROJECT    default for --project
   FSQ_DATABASE   default for --database (otherwise "(default)")
   Flags win over environment variables.
 
-output:
+Output:
   A table on a terminal, JSON otherwise (indented on a terminal, compact in a pipe);
   jsonl is always compact. --format, --pretty, --compact and --plain override.
 
-exit codes:
+Exit codes:
+  (the process exit codes; match on these in scripts)
   0  ok
   1  other error
   2  usage error (bad flag, path, filter, field op or --data)
@@ -109,29 +114,42 @@ pub struct Cli {
 
 /// Which database to talk to.
 #[derive(Debug, Clone, Args)]
+#[command(next_help_heading = "Global options")]
 pub struct ConnArgs {
-    /// Google Cloud project id (required, except for `completions`).
-    #[arg(long, global = true, env = "FSQ_PROJECT", value_name = "PROJECT")]
+    /// Google Cloud project id. Default: the `FSQ_PROJECT` environment variable; required
+    /// unless that is set.
+    #[arg(long, global = true, value_name = "PROJECT")]
     pub project: Option<ProjectId>,
-    /// Firestore database id.
-    #[arg(
-        long,
-        global = true,
-        env = "FSQ_DATABASE",
-        value_name = "DATABASE",
-        default_value_t = DatabaseId::default()
-    )]
-    pub database: DatabaseId,
+    /// Firestore database id. Default: the `FSQ_DATABASE` environment variable, else
+    /// `(default)`.
+    #[arg(long, global = true, value_name = "DATABASE")]
+    pub database: Option<DatabaseId>,
 }
 
 impl ConnArgs {
-    /// The database addressed, or `None` when `--project` (and `FSQ_PROJECT`) is unset.
-    #[must_use]
-    pub fn target(&self) -> Option<DbTarget> {
-        self.project.clone().map(|project| DbTarget {
-            project,
-            database: self.database.clone(),
-        })
+    /// The database addressed: flags first, then the `FSQ_PROJECT` / `FSQ_DATABASE`
+    /// values `env` yields (empty ones count as unset), then `(default)` for the
+    /// database. `None` when no project is given anywhere.
+    ///
+    /// # Errors
+    /// A message naming the variable when its value is not a valid id.
+    pub fn target(&self, env: impl Fn(&str) -> Option<String>) -> Result<Option<DbTarget>, String> {
+        fn resolve<T: FromStr<Err = IdError> + Clone>(
+            flag: Option<&T>,
+            name: &str,
+            env: &impl Fn(&str) -> Option<String>,
+        ) -> Result<Option<T>, String> {
+            match flag {
+                Some(value) => Ok(Some(value.clone())),
+                None => env(name)
+                    .filter(|v| !v.is_empty())
+                    .map(|v| v.parse().map_err(|e| format!("invalid {name}: {e}")))
+                    .transpose(),
+            }
+        }
+        let project = resolve(self.project.as_ref(), "FSQ_PROJECT", &env)?;
+        let database = resolve(self.database.as_ref(), "FSQ_DATABASE", &env)?.unwrap_or_default();
+        Ok(project.map(|project| DbTarget { project, database }))
     }
 }
 
@@ -148,6 +166,7 @@ enum FormatArg {
 
 /// How results are printed.
 #[derive(Debug, Clone, Args)]
+#[command(next_help_heading = "Global options")]
 pub struct OutArgs {
     /// Output format. Default: table on a terminal, json otherwise.
     #[arg(long, global = true, value_enum)]
@@ -254,7 +273,10 @@ pub struct Selection {
     /// Read every collection with this id at any depth (a bare id like `orders`).
     #[arg(long, value_name = "COLLECTION_ID")]
     group: Option<CollectionId>,
-    /// Condition `<field> <op> <value>`; repeat for AND. Quote the whole filter.
+    /// Condition `<field> <op> <value>`, e.g. --where 'age >= 18'; repeat for AND. Quote the
+    /// whole filter. Operators: == != < <= > >= in not-in array-contains
+    /// array-contains-any; `in`, `not-in` and `array-contains-any` take a list `[a, b]`.
+    /// Values: 18, 1.5, true, null, ts:2026-01-05T10:00:00Z, ref:users/u1, "quoted text".
     #[arg(long = "where", value_name = "FILTER", action = clap::ArgAction::Append)]
     where_: Vec<Filter>,
 }
@@ -286,11 +308,13 @@ impl Selection {
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
     /// Print one document.
+    #[command(after_long_help = SEE_ROOT_HELP)]
     Get {
         /// Document path, e.g. `users/u1`.
         path: DocPath,
     },
     /// List documents of a collection. At most 100 unless --limit or --all.
+    #[command(after_long_help = SEE_ROOT_HELP)]
     Query {
         #[command(flatten)]
         selection: Selection,
@@ -311,6 +335,7 @@ pub enum Cmd {
         select: Option<FieldList>,
     },
     /// Count documents, or sum/average a numeric field, on the server.
+    #[command(after_long_help = SEE_ROOT_HELP)]
     Count {
         #[command(flatten)]
         selection: Selection,
@@ -322,17 +347,20 @@ pub enum Cmd {
         avg: Vec<FieldPath>,
     },
     /// List collection ids: the root ones, or those under a document.
+    #[command(after_long_help = SEE_ROOT_HELP)]
     Collections {
         /// Document whose subcollections to list; omit for the root collections.
         parent: Option<DocPath>,
     },
     /// List the composite indexes of a collection id.
+    #[command(after_long_help = SEE_ROOT_HELP)]
     Indexes {
         /// Collection id, e.g. `orders`.
         collection: CollectionId,
     },
     /// Write a whole document. Creates it; fails with exit 4 if it exists, unless
     /// --overwrite or --merge.
+    #[command(after_long_help = SEE_ROOT_HELP)]
     Set {
         /// Document path, e.g. `users/u1`.
         path: DocPath,
@@ -351,11 +379,14 @@ pub enum Cmd {
         if_unchanged_since: Option<UpdateTime>,
     },
     /// Change fields of an existing document: --set field=value, field+=v, field-=v.
+    #[command(after_long_help = SEE_ROOT_HELP)]
     Update {
         /// Document path, e.g. `users/u1`.
         path: DocPath,
-        /// `field=value` sets, `field+=v` array-unions, `field-=v` array-removes (not
-        /// numeric increments); repeat for several changes.
+        /// `f=v` sets a field; `f+=v` ARRAY-UNION (adds v to an array); `f-=v` ARRAY-REMOVE
+        /// (removes v from an array); not numeric increments. Repeat for several changes.
+        /// Values: 18, 1.5, true, null, ts:..., ref:..., "text", [a, b]. Backtick field
+        /// names with spaces or punctuation: `my-field`=1.
         #[arg(
             long = "set",
             value_name = "OP",
@@ -368,6 +399,7 @@ pub enum Cmd {
         if_unchanged_since: Option<UpdateTime>,
     },
     /// Delete a document (fails with exit 3 if it does not exist).
+    #[command(after_long_help = SEE_ROOT_HELP)]
     Delete {
         /// Document path, e.g. `users/u1`.
         path: DocPath,
@@ -380,6 +412,17 @@ pub enum Cmd {
         /// The shell to generate for.
         shell: Shell,
     },
+}
+
+impl Cmd {
+    /// Whether the command changes data (and so needs write authorization).
+    #[must_use]
+    pub fn is_write(&self) -> bool {
+        matches!(
+            self,
+            Self::Set { .. } | Self::Update { .. } | Self::Delete { .. }
+        )
+    }
 }
 
 fn guard(since: Option<UpdateTime>) -> Guard {
@@ -849,17 +892,33 @@ mod tests {
     }
 
     #[test]
-    fn target_uses_default_database_and_requires_project() {
-        let cli = Cli::try_parse_from(["fsq", "--project", "p", "get", "u/1"]).unwrap();
-        let target = cli.conn.target().unwrap();
-        assert_eq!(
-            (target.project.as_str(), target.database.as_str()),
-            ("p", "(default)")
-        );
-        // Flags may follow the subcommand.
-        let cli = Cli::try_parse_from(["fsq", "get", "u/1", "--project", "q", "--database", "d"])
-            .unwrap();
-        assert_eq!(cli.conn.target().unwrap().database.as_str(), "d");
+    fn target_resolves_flags_then_env_then_default() {
+        let no_env = |_: &str| None;
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(["fsq"].into_iter().chain(args.iter().copied()))
+                .unwrap()
+                .conn
+        };
+        let show = |t: Result<Option<DbTarget>, String>| {
+            t.map(|t| t.map(|t| format!("{}/{}", t.project, t.database)))
+        };
+        let env = |name: &str| match name {
+            "FSQ_PROJECT" => Some("ep".to_owned()),
+            "FSQ_DATABASE" => Some("ed".to_owned()),
+            _ => None,
+        };
+        let empty = |_: &str| Some(String::new());
+        let conn = parse(&["get", "u/1", "--project", "q", "--database", "d"]);
+        assert_eq!(show(conn.target(env)), Ok(Some("q/d".into())));
+        let conn = parse(&["get", "u/1"]);
+        assert_eq!(show(conn.target(env)), Ok(Some("ep/ed".into())));
+        assert_eq!(show(conn.target(no_env)), Ok(None));
+        assert_eq!(show(conn.target(empty)), Ok(None));
+        let conn = parse(&["get", "u/1", "--project", "p"]);
+        assert_eq!(show(conn.target(no_env)), Ok(Some("p/(default)".into())));
+        assert_eq!(show(conn.target(empty)), Ok(Some("p/(default)".into())));
+        let bad = |_: &str| Some("Bad Name".to_owned());
+        assert!(matches!(conn.target(bad), Err(m) if m.contains("FSQ_DATABASE")));
     }
 
     #[test]
