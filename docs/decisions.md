@@ -181,3 +181,7 @@ Terms: see `glossary.md`.
   - `failure_persistence` is off. The nix build drops `proptest-regressions/`, so replay files would not run on
     CI. A real counterexample becomes a named example test instead.
   - Properties are unit tests next to the code, not in `tests/`: integration tests cannot see test-only helpers.
+  - Value equality in properties is `arb::same`: any NaN equals any NaN, because typed JSON writes every NaN
+    as `"NaN"` and does not keep its sign or payload; every other double, and geo coordinates, compare by
+    bits. The protobuf properties use `arb::same_bits`, since protobuf keeps the payload. Production
+    `PartialEq` is unchanged.

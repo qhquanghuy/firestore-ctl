@@ -70,8 +70,14 @@ fn double_json(f: f64) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::{plain_json, typed_json};
+    use crate::domain::arb;
     use crate::domain::document::Document;
+    use crate::domain::path::DocPath;
     use crate::domain::value::{Fields, GeoPoint, Timestamp, UpdateTime, Value};
+    use proptest::collection::{btree_map, vec};
+    use proptest::prelude::*;
+    use proptest::sample::select;
+    use serde_json::Value as Json;
     use serde_json::json;
 
     fn ts(s: &str) -> Timestamp {
@@ -515,5 +521,168 @@ mod tests {
             plain_json::value_to_json(&v),
             json!({"d": 1.5, "nan": "NaN", "b": "AP8=", "r": "teams/t1", "g": {"lat": 1.5, "lng": -2.0}, "i": 3})
         );
+    }
+
+    const ENVELOPE_KEYS: [&str; 4] = ["_path", "_updateTime", "_plain", "_select"];
+
+    fn json_key() -> impl Strategy<Value = String> {
+        let special = select(vec![
+            "$ts",
+            "$ref",
+            "$double",
+            "$bytes",
+            "$geo",
+            "$map",
+            "$nope",
+            "_path",
+            "_updateTime",
+            "_plain",
+            "_select",
+            "data",
+            "lat",
+            "lng",
+        ])
+        .prop_map(str::to_owned);
+        prop_oneof![3 => special, 1 => arb::text()]
+    }
+
+    // Biased to what the decoder special-cases: tags, envelope keys, `u64` above `i64::MAX`,
+    // integral doubles beyond `i64`, and strings a tag accepts. An array in an array is legal
+    // input here, because the decoder must reject it, not panic.
+    fn arbitrary_json() -> impl Strategy<Value = Json> {
+        let strings = prop_oneof![
+            3 => arb::text(),
+            2 => select(vec![
+                "NaN",
+                "Infinity",
+                "-Infinity",
+                "AP8=",
+                "!!!",
+                "2026-01-05T10:00:00Z",
+                "teams/t1",
+                "teams",
+                "projects/p/databases/d/documents/users/u1",
+                "a.`b c`",
+            ])
+            .prop_map(str::to_owned),
+        ];
+        let numbers = prop_oneof![
+            any::<i64>().prop_map(Json::from),
+            ((1_u64 << 63)..=u64::MAX).prop_map(Json::from),
+            any::<f64>().prop_map(Json::from),
+            select(vec![1e30, 9.3e18, -0.0, 1.0, 5e-324, 91.0, -181.0]).prop_map(Json::from),
+        ];
+        let leaf = prop_oneof![
+            1 => Just(Json::Null),
+            1 => any::<bool>().prop_map(Json::Bool),
+            3 => numbers,
+            3 => strings.prop_map(Json::String),
+        ];
+        leaf.prop_recursive(3, 24, 6, |inner| {
+            prop_oneof![
+                vec(inner.clone(), 0..=6).prop_map(Json::Array),
+                btree_map(json_key(), inner, 0..=4)
+                    .prop_map(|entries| Json::Object(entries.into_iter().collect())),
+            ]
+        })
+    }
+
+    // A document path that starts with `projects/` must not be read as a resource name.
+    fn projects_ref() -> impl Strategy<Value = DocPath> {
+        let prefix = select(vec!["projects/x/", "projects/p/databases/d/"]);
+        (prefix, arb::doc_path()).prop_filter_map("a document path", |(prefix, p)| {
+            format!("{prefix}{p}").parse().ok()
+        })
+    }
+
+    proptest! {
+        #![proptest_config(arb::config())]
+
+        #[test]
+        fn a_value_round_trips_in_memory_and_through_text(v in arb::value()) {
+            let direct = typed_json::value_from_json(&typed_json::value_to_json(&v));
+            prop_assert!(direct.as_ref().is_ok_and(|back| arb::same(back, &v)), "{direct:?}");
+            let text = through_text(&v);
+            prop_assert!(text.as_ref().is_ok_and(|back| arb::same(back, &v)), "{text:?}");
+        }
+
+        #[test]
+        fn a_ref_under_projects_stays_a_ref(path in projects_ref()) {
+            let v = Value::Ref(path);
+            let text = through_text(&v);
+            prop_assert_eq!(text, Ok(v));
+        }
+
+        #[test]
+        fn a_full_document_round_trips_without_markers(d in arb::document()) {
+            let input = typed_json::parse_input(&typed_json::document_to_json(&d));
+            prop_assert!(
+                input.as_ref().is_ok_and(|i| {
+                    arb::same_fields(&i.fields, &d.data)
+                        && i.envelope.as_ref().is_some_and(|e| {
+                            e.path.as_ref() == Some(&d.path)
+                                && e.update_time == Some(d.update_time)
+                                && !e.plain
+                                && e.select.is_none()
+                        })
+                }),
+                "{input:?}"
+            );
+        }
+
+        #[test]
+        fn a_selection_marker_survives_beside_the_fields(
+            d in arb::document(),
+            select in vec(arb::field_path(), 0..=3),
+        ) {
+            let marked = super::mark_selected(typed_json::document_to_json(&d), &select);
+            let input = typed_json::parse_input(&marked);
+            prop_assert!(
+                input.as_ref().is_ok_and(|i| {
+                    arb::same_fields(&i.fields, &d.data)
+                        && i.envelope.as_ref().is_some_and(|e| e.select.as_ref() == Some(&select))
+                }),
+                "{input:?}"
+            );
+        }
+
+        #[test]
+        fn plain_output_is_marked_and_is_never_read_back_as_typed(d in arb::document()) {
+            let json = plain_json::document_to_json(&d);
+            prop_assert_eq!(&json["_plain"], &Json::Bool(true));
+            if let Ok(input) = typed_json::parse_input(&json) {
+                prop_assert!(input.envelope.is_some_and(|e| e.plain), "{json}");
+            }
+        }
+
+        #[test]
+        fn bare_data_has_no_envelope(fields in arb::fields()) {
+            let fields: Fields = fields
+                .into_iter()
+                .filter(|(key, _)| !ENVELOPE_KEYS.contains(&key.as_str()))
+                .collect();
+            let bare = Json::Object(super::fields_to_object(&fields, typed_json::value_to_json));
+            let input = typed_json::parse_input(&bare);
+            prop_assert!(
+                input.as_ref().is_ok_and(|i| {
+                    i.envelope.is_none() && arb::same_fields(&i.fields, &fields)
+                }),
+                "{input:?}"
+            );
+        }
+
+        #[test]
+        fn decoding_arbitrary_json_returns(j in arbitrary_json()) {
+            typed_json::parse_input(&j).ok();
+            typed_json::value_from_json(&j).ok();
+        }
+
+        #[test]
+        fn a_decoded_value_encodes_back_to_itself(j in arbitrary_json()) {
+            if let Ok(v) = typed_json::value_from_json(&j) {
+                let again = typed_json::value_from_json(&typed_json::value_to_json(&v));
+                prop_assert!(again.as_ref().is_ok_and(|a| arb::same(a, &v)), "{j} -> {again:?}");
+            }
+        }
     }
 }

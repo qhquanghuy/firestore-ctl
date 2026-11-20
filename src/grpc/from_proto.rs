@@ -167,8 +167,10 @@ mod tests {
     };
     use gcloud_sdk::google::firestore::v1::value::ValueType;
     use gcloud_sdk::prost_types;
+    use proptest::prelude::*;
 
     use super::*;
+    use crate::domain::arb;
     use crate::domain::{GeoPoint, IndexMode, QueryScope};
     use crate::grpc::test_util::{doc, target};
     use crate::grpc::to_proto;
@@ -327,6 +329,51 @@ mod tests {
             .is_err()
         );
         assert!(document(named("projects/p/databases/d/documents/users", true), &t).is_err());
+    }
+
+    proptest! {
+        #![proptest_config(arb::config())]
+
+        #[test]
+        fn a_value_round_trips_through_proto_bit_for_bit(v in arb::value()) {
+            let t = arb::fixed_target();
+            let back = value(to_proto::value(&v, &t), &t);
+            prop_assert!(back.as_ref().is_ok_and(|b| arb::same_bits(b, &v)), "{back:?}");
+        }
+
+        #[test]
+        fn a_name_inside_the_target_is_a_ref_of_the_same_path(
+            t in arb::db_target(),
+            p in arb::doc_path(),
+        ) {
+            let name = format!("{}/{p}", t.documents_root());
+            let proto = proto::Value { value_type: Some(ValueType::ReferenceValue(name)) };
+            prop_assert_eq!(value(proto, &t), Ok(Value::Ref(p)));
+        }
+
+        #[test]
+        fn a_document_round_trips_through_proto(d in arb::document()) {
+            let t = arb::fixed_target();
+            let message = proto::Document {
+                name: to_proto::doc_name(&d.path, &t),
+                fields: d
+                    .data
+                    .iter()
+                    .map(|(k, v)| (k.clone(), to_proto::value(v, &t)))
+                    .collect(),
+                create_time: None,
+                update_time: Some(to_proto::update_time(&d.update_time)),
+            };
+            let back = document(message, &t);
+            prop_assert!(
+                back.as_ref().is_ok_and(|b| {
+                    b.path == d.path
+                        && b.update_time == d.update_time
+                        && arb::same_fields_bits(&b.data, &d.data)
+                }),
+                "{back:?}"
+            );
+        }
     }
 
     fn index_field(path: &str, mode: ValueMode) -> IndexField {
