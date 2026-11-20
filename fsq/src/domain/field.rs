@@ -14,20 +14,48 @@ pub enum FieldPathError {
     Empty,
     /// The segment at this zero-based position was empty (e.g. `a..b`).
     #[error("field path `{input}` has an empty segment at position {position}")]
-    EmptySegment { input: String, position: usize },
+    EmptySegment {
+        /// The rejected path (for [`FieldPath::from_segments`], the segments joined by `.`).
+        input: String,
+        /// Zero-based segment position.
+        position: usize,
+    },
     /// A backtick-quoted segment was never closed.
     #[error("field path `{0}` has an unterminated backtick quote")]
     UnterminatedQuote(String),
     /// A backtick appeared inside an unquoted segment, or text followed a closing quote.
     #[error("field path `{0}` has an unexpected backtick or text after a quoted segment")]
     Unexpected(String),
+    /// A backslash inside a quoted segment was followed by something other than `` ` `` or `\`.
+    #[error(
+        "field path `{input}` has an invalid escape `\\{escape}`; only \\` and \\\\ are allowed"
+    )]
+    InvalidEscape {
+        /// The rejected path.
+        input: String,
+        /// The character after the backslash.
+        escape: char,
+    },
 }
 
-/// A path to a (possibly nested) field: a non-empty list of segments.
+/// A path to a (possibly nested) field: a non-empty list of non-empty segments.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FieldPath(Vec<String>);
 
 impl FieldPath {
+    /// Builds a path from raw segments (e.g. map keys that may contain dots),
+    /// with no quoting or parsing involved.
+    ///
+    /// # Errors
+    /// [`FieldPathError::Empty`] if there are no segments, or
+    /// [`FieldPathError::EmptySegment`] if any segment is empty.
+    pub fn from_segments(
+        segments: impl IntoIterator<Item = String>,
+    ) -> Result<Self, FieldPathError> {
+        let segments: Vec<String> = segments.into_iter().collect();
+        non_empty_segments(segments, |segs| segs.iter().join("."))
+    }
+
     /// The unquoted, unescaped segments, outermost first.
     #[must_use]
     pub fn segments(&self) -> &[String] {
@@ -45,6 +73,24 @@ impl FieldPath {
 impl fmt::Display for FieldPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.to_firestore())
+    }
+}
+
+/// Checks the invariant (at least one segment, none empty); `describe` renders
+/// the input for error messages.
+fn non_empty_segments(
+    segments: Vec<String>,
+    describe: impl FnOnce(&[String]) -> String,
+) -> Result<FieldPath, FieldPathError> {
+    if segments.is_empty() {
+        return Err(FieldPathError::Empty);
+    }
+    match segments.iter().position(String::is_empty) {
+        Some(position) => Err(FieldPathError::EmptySegment {
+            input: describe(&segments),
+            position,
+        }),
+        None => Ok(FieldPath(segments)),
     }
 }
 
@@ -78,7 +124,8 @@ fn take_segment<'a>(rest: &'a str, input: &str) -> Result<(String, &'a str), Fie
     }
 }
 
-/// Reads a quoted segment body (after the opening backtick) up to the closing backtick.
+/// Reads a quoted segment body (after the opening backtick) up to the closing
+/// backtick. Only `` \` `` and `\\` are valid escapes.
 fn take_quoted<'a>(body: &'a str, input: &str) -> Result<(String, &'a str), FieldPathError> {
     let mut out = String::new();
     let mut chars = body.char_indices();
@@ -86,34 +133,19 @@ fn take_quoted<'a>(body: &'a str, input: &str) -> Result<(String, &'a str), Fiel
         match c {
             '`' => return Ok((out, &body[i + 1..])),
             '\\' => match chars.next() {
-                Some((_, escaped)) => out.push(escaped),
+                Some((_, escaped @ ('`' | '\\'))) => out.push(escaped),
+                Some((_, escape)) => {
+                    return Err(FieldPathError::InvalidEscape {
+                        input: input.to_owned(),
+                        escape,
+                    });
+                }
                 None => break,
             },
             _ => out.push(c),
         }
     }
     Err(FieldPathError::UnterminatedQuote(input.to_owned()))
-}
-
-/// Reads segments from `rest` (which starts at a segment), accumulating into `done`.
-fn read_segments(
-    rest: &str,
-    input: &str,
-    done: Vec<String>,
-) -> Result<Vec<String>, FieldPathError> {
-    let (segment, after) = take_segment(rest, input)?;
-    if segment.is_empty() {
-        return Err(FieldPathError::EmptySegment {
-            input: input.to_owned(),
-            position: done.len(),
-        });
-    }
-    let done = done.into_iter().chain(Some(segment)).collect();
-    match after.strip_prefix('.') {
-        Some(next) => read_segments(next, input, done),
-        None if after.is_empty() => Ok(done),
-        None => Err(FieldPathError::Unexpected(input.to_owned())),
-    }
 }
 
 impl FromStr for FieldPath {
@@ -125,7 +157,18 @@ impl FromStr for FieldPath {
         if s.is_empty() {
             return Err(FieldPathError::Empty);
         }
-        read_segments(s, s, Vec::new()).map(Self)
+        let mut segments = Vec::new();
+        let mut rest = s;
+        loop {
+            let (segment, after) = take_segment(rest, s)?;
+            segments.push(segment);
+            match after.strip_prefix('.') {
+                Some(next) => rest = next,
+                None if after.is_empty() => break,
+                None => return Err(FieldPathError::Unexpected(s.to_owned())),
+            }
+        }
+        non_empty_segments(segments, |_| s.to_owned())
     }
 }
 
@@ -186,6 +229,46 @@ mod tests {
         assert!(matches!(
             "`a`b".parse::<FieldPath>(),
             Err(FieldPathError::Unexpected(_))
+        ));
+    }
+
+    #[test]
+    fn only_backtick_and_backslash_escapes_are_allowed() {
+        assert!(matches!(
+            "`a\\nb`".parse::<FieldPath>(),
+            Err(FieldPathError::InvalidEscape { escape: 'n', .. })
+        ));
+        assert!(matches!(
+            "`a\\.b`".parse::<FieldPath>(),
+            Err(FieldPathError::InvalidEscape { escape: '.', .. })
+        ));
+        let msg = "`a\\nb`".parse::<FieldPath>().unwrap_err().to_string();
+        assert!(msg.contains("a\\nb"), "{msg}");
+    }
+
+    #[test]
+    fn very_long_paths_parse_without_deep_recursion() {
+        let long = vec!["a"; 200_000].join(".");
+        assert_eq!(long.parse::<FieldPath>().unwrap().segments().len(), 200_000);
+    }
+
+    #[test]
+    fn from_segments_keeps_raw_segments() {
+        let p = FieldPath::from_segments(["a.b".to_owned(), "c d".to_owned()]).unwrap();
+        assert_eq!(p.segments(), ["a.b", "c d"]);
+        assert_eq!(p.to_firestore(), "`a.b`.`c d`");
+        assert_eq!(p.to_string().parse::<FieldPath>(), Ok(p));
+    }
+
+    #[test]
+    fn from_segments_rejects_empty_input() {
+        assert_eq!(
+            FieldPath::from_segments(Vec::<String>::new()),
+            Err(FieldPathError::Empty)
+        );
+        assert!(matches!(
+            FieldPath::from_segments(["a".to_owned(), String::new()]),
+            Err(FieldPathError::EmptySegment { position: 1, .. })
         ));
     }
 }

@@ -54,8 +54,12 @@ fn is_database_id(s: &str) -> bool {
     s == DEFAULT_DATABASE || is_lowercase_slug(s)
 }
 
+/// A single path segment: no `/`, and not a Firestore-reserved name
+/// (`.`, `..`, or anything of the form `__x__`).
 fn is_segment(s: &str) -> bool {
-    !s.contains('/')
+    let reserved =
+        s == "." || s == ".." || (s.len() >= 4 && s.starts_with("__") && s.ends_with("__"));
+    !s.contains('/') && !reserved
 }
 
 const DEFAULT_DATABASE: &str = "(default)";
@@ -110,7 +114,7 @@ id_newtype!(
     /// A collection name: one non-empty path segment.
     CollectionId,
     "collection id",
-    "must not contain `/`",
+    "must not contain `/`, be `.` or `..`, or match `__x__`",
     is_segment
 );
 
@@ -118,7 +122,7 @@ id_newtype!(
     /// A document name: one non-empty path segment.
     DocId,
     "document id",
-    "must not contain `/`",
+    "must not contain `/`, be `.` or `..`, or match `__x__`",
     is_segment
 );
 
@@ -209,5 +213,16 @@ mod tests {
         assert!("a b.c".parse::<DocId>().is_ok());
         assert!("".parse::<DocId>().is_err());
         assert!("a/b".parse::<CollectionId>().is_err());
+    }
+
+    #[test]
+    fn reserved_collection_and_doc_ids_are_rejected() {
+        for reserved in [".", "..", "__name__", "__a__", "____"] {
+            assert!(reserved.parse::<DocId>().is_err(), "{reserved}");
+            assert!(reserved.parse::<CollectionId>().is_err(), "{reserved}");
+        }
+        for fine in ["__a", "a__", "_", "__", "___", "...", ".a", "a.b"] {
+            assert!(fine.parse::<DocId>().is_ok(), "{fine}");
+        }
     }
 }

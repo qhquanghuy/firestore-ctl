@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use thiserror::Error;
 
-use super::ids::{CollectionId, DocId};
+use super::ids::{CollectionId, DocId, IdError};
 
 /// Why a string is not a valid collection or document path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Error)]
@@ -13,9 +13,24 @@ pub enum PathError {
     /// The path had no segments.
     #[error("path must not be empty")]
     Empty,
-    /// The segment at this zero-based position was empty (e.g. `a//b`).
-    #[error("path has an empty segment at position {0}")]
-    EmptySegment(usize),
+    /// A segment was empty (e.g. `a//b`, `users//`, `//users`).
+    #[error("path `{input}` has an empty segment at position {position}")]
+    EmptySegment {
+        /// The path as given.
+        input: String,
+        /// Zero-based segment position, after removing one leading and one trailing `/`.
+        position: usize,
+    },
+    /// A segment is not a valid collection or document id.
+    #[error("path `{input}` has an invalid segment at position {position}: {source}")]
+    InvalidSegment {
+        /// The path as given.
+        input: String,
+        /// Zero-based segment position, after removing one leading and one trailing `/`.
+        position: usize,
+        /// Why the segment was rejected.
+        source: IdError,
+    },
     /// A document path (even number of segments) was required.
     #[error("`{0}` is a collection path; expected a document path like `collection/doc`")]
     ExpectedDoc(String),
@@ -114,18 +129,33 @@ impl fmt::Display for AnyPath {
     }
 }
 
-/// Parses one segment; an id can only fail to parse here by being empty.
-fn segment<T: FromStr>(raw: &str, position: usize) -> Result<T, PathError> {
-    raw.parse().map_err(|_| PathError::EmptySegment(position))
+/// Parses the segment at `position` of `input` as an id.
+fn segment<T: FromStr<Err = IdError>>(
+    raw: &str,
+    position: usize,
+    input: &str,
+) -> Result<T, PathError> {
+    if raw.is_empty() {
+        return Err(PathError::EmptySegment {
+            input: input.to_owned(),
+            position,
+        });
+    }
+    raw.parse().map_err(|source| PathError::InvalidSegment {
+        input: input.to_owned(),
+        position,
+        source,
+    })
 }
 
 impl FromStr for AnyPath {
     type Err = PathError;
 
-    /// Segments alternate `collection/doc/collection/...`; leading and
-    /// trailing `/` characters are trimmed before parsing.
+    /// Segments alternate `collection/doc/collection/...`. At most one leading
+    /// and one trailing `/` are removed; any other empty segment is an error.
     fn from_str(s: &str) -> Result<Self, PathError> {
-        let trimmed = s.trim_matches('/');
+        let trimmed = s.strip_prefix('/').unwrap_or(s);
+        let trimmed = trimmed.strip_suffix('/').unwrap_or(trimmed);
         if trimmed.is_empty() {
             return Err(PathError::Empty);
         }
@@ -135,15 +165,18 @@ impl FromStr for AnyPath {
         let last_doc = pairs.iter().enumerate().try_fold(
             None::<DocPath>,
             |parent, (i, pair)| -> Result<_, PathError> {
-                let collection = CollectionPath::new(parent, segment(pair[0], 2 * i)?);
-                Ok(Some(DocPath::new(collection, segment(pair[1], 2 * i + 1)?)))
+                let collection = CollectionPath::new(parent, segment(pair[0], 2 * i, s)?);
+                Ok(Some(DocPath::new(
+                    collection,
+                    segment(pair[1], 2 * i + 1, s)?,
+                )))
             },
         )?;
 
         match remainder {
             [name] => Ok(Self::Collection(CollectionPath::new(
                 last_doc,
-                segment(name, segments.len() - 1)?,
+                segment(name, segments.len() - 1, s)?,
             ))),
             _ => last_doc.map(Self::Doc).ok_or(PathError::Empty),
         }
@@ -202,7 +235,7 @@ mod tests {
         assert_eq!("/".parse::<AnyPath>(), Err(PathError::Empty));
         assert!(matches!(
             "users//a".parse::<AnyPath>(),
-            Err(PathError::EmptySegment(1))
+            Err(PathError::EmptySegment { position: 1, .. })
         ));
         assert!(matches!(
             "users".parse::<DocPath>(),
@@ -216,15 +249,59 @@ mod tests {
     }
 
     #[test]
-    fn empty_segment_position_is_reported_in_nested_paths() {
+    fn at_most_one_leading_and_trailing_slash_is_removed() {
         assert_eq!(
-            "a/b/c//d".parse::<AnyPath>(),
-            Err(PathError::EmptySegment(3))
-        );
-        assert_eq!(
-            "a/b//".parse::<AnyPath>().map(|p| p.to_string()),
+            "a/b/".parse::<AnyPath>().map(|p| p.to_string()),
             Ok("a/b".into())
         );
+        assert_eq!(
+            "users/".parse::<AnyPath>().map(|p| p.to_string()),
+            Ok("users".into())
+        );
+        assert!(matches!(
+            "users//".parse::<AnyPath>(),
+            Err(PathError::EmptySegment { position: 1, .. })
+        ));
+        assert!(matches!(
+            "//users".parse::<AnyPath>(),
+            Err(PathError::EmptySegment { position: 0, .. })
+        ));
+        assert!(matches!(
+            "a/b//".parse::<AnyPath>(),
+            Err(PathError::EmptySegment { position: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn empty_segment_position_is_reported_in_nested_paths() {
+        assert!(matches!(
+            "a/b/c//d".parse::<AnyPath>(),
+            Err(PathError::EmptySegment { position: 3, .. })
+        ));
+    }
+
+    #[test]
+    fn invalid_segments_carry_position_and_cause() {
+        let err = "users/a/orders/..".parse::<AnyPath>().unwrap_err();
+        assert!(matches!(
+            err,
+            PathError::InvalidSegment {
+                position: 3,
+                source: IdError::Invalid { .. },
+                ..
+            }
+        ));
+        assert!(err.to_string().contains("users/a/orders/.."), "{err}");
+        assert!(matches!(
+            "__x__/a".parse::<AnyPath>(),
+            Err(PathError::InvalidSegment { position: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn empty_segment_message_mentions_the_input() {
+        let msg = "/users//a".parse::<AnyPath>().unwrap_err().to_string();
+        assert!(msg.contains("/users//a"), "{msg}");
     }
 
     #[test]
