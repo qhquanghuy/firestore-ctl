@@ -1,0 +1,29 @@
+//! Process exit codes (documented in `--help`):
+//! `0` ok, `1` other error, `2` usage (clap), `3` not found, `4` already exists,
+//! `5` precondition failed, `6` writes disabled, `7` missing index, `8` auth.
+
+use std::process::ExitCode;
+
+use crate::app::AppError;
+use crate::port::GatewayError;
+
+/// The exit code for a failed request.
+#[must_use]
+pub fn exit_code(e: &AppError) -> ExitCode {
+    ExitCode::from(exit_code_value(e))
+}
+
+/// The numeric value of [`exit_code`].
+#[must_use]
+pub fn exit_code_value(e: &AppError) -> u8 {
+    match e {
+        AppError::Input(_) => 2,
+        AppError::NotFound(_) | AppError::Gateway(GatewayError::NotFound(_)) => 3,
+        AppError::Gateway(GatewayError::AlreadyExists(_)) => 4,
+        AppError::Gateway(GatewayError::PreconditionFailed(_)) => 5,
+        AppError::WritesDisabled(_) => 6,
+        AppError::MissingIndex { .. } | AppError::Gateway(GatewayError::MissingIndex { .. }) => 7,
+        AppError::Gateway(GatewayError::Auth(_)) => 8,
+        AppError::Gateway(GatewayError::Other(_)) => 1,
+    }
+}

@@ -40,14 +40,14 @@ pub enum PathError {
 }
 
 /// A collection: top-level, or a subcollection of a document.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CollectionPath {
     parent: Option<Box<DocPath>>,
     id: CollectionId,
 }
 
 /// A document inside a collection.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DocPath {
     collection: CollectionPath,
     id: DocId,
