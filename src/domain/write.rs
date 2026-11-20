@@ -11,7 +11,6 @@ use super::value::{Fields, UpdateTime, Value};
 /// One field change from a `field=value`, `field+=value` or `field-=value` flag.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldOp {
-    /// Set the field to a value.
     Set(FieldPath, Value),
     /// Add the elements to the array field, skipping ones already present.
     ArrayUnion(FieldPath, Vec<Value>),
@@ -19,23 +18,15 @@ pub enum FieldOp {
     ArrayRemove(FieldPath, Vec<Value>),
 }
 
-/// Why a list of field changes cannot be applied as one update.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum WriteError {
-    /// Two changes touch the same field, or one touches a field inside the other.
     #[error(
         "conflicting changes to `{first}` and `{second}`: each field can be changed once, and not together with a field inside it"
     )]
-    Overlap {
-        /// The earlier of the two paths.
-        first: FieldPath,
-        /// The later of the two paths.
-        second: FieldPath,
-    },
+    Overlap { first: FieldPath, second: FieldPath },
 }
 
 impl FieldOp {
-    /// The field this change applies to.
     #[must_use]
     pub fn path(&self) -> &FieldPath {
         match self {
@@ -44,9 +35,8 @@ impl FieldOp {
     }
 }
 
-/// Checks that `ops` can be sent as one update: Firestore rejects a field changed twice
-/// (a set and an array change included) and a map changed together with a field inside
-/// it (`a` with `a.b`).
+/// Firestore rejects a field changed twice (a set and an array change included) and a map
+/// changed together with a field inside it (`a` with `a.b`).
 ///
 /// # Errors
 /// [`WriteError::Overlap`] naming the first conflicting pair.
@@ -68,17 +58,13 @@ pub fn check_field_ops(ops: &NonEmptyVec<FieldOp>) -> Result<(), WriteError> {
         })
 }
 
-/// A precondition on the document's current state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Guard {
-    /// Write regardless of the document's current state.
     None,
-    /// Write only if the document has not changed since this `_updateTime`.
     UnchangedSince(UpdateTime),
 }
 
 impl Guard {
-    /// The update time the document must still have, if this guard demands one.
     #[must_use]
     pub fn unchanged_since(&self) -> Option<&UpdateTime> {
         match self {
@@ -88,62 +74,43 @@ impl Guard {
     }
 }
 
-/// How a whole-document write treats an existing document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetMode {
-    /// Fail if the document already exists (no guard applies).
     Create,
-    /// Replace the document entirely.
     Overwrite(Guard),
     /// Merge the given fields into the document, creating it if missing. With
     /// [`Guard::UnchangedSince`] a missing document fails the precondition instead.
     Merge(Guard),
 }
 
-/// Write a whole document's data.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetDoc {
-    /// The document written.
     pub path: DocPath,
-    /// The data written.
     pub data: Fields,
-    /// How an existing document is treated.
     pub mode: SetMode,
 }
 
-/// Change individual fields of an existing document.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpdateDoc {
-    /// The document changed.
     pub path: DocPath,
-    /// The field changes, applied in order.
     pub ops: NonEmptyVec<FieldOp>,
-    /// The precondition.
     pub guard: Guard,
 }
 
-/// Delete a document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteDoc {
-    /// The document deleted.
     pub path: DocPath,
-    /// The precondition.
     pub guard: Guard,
 }
 
-/// Any single-document write.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Write {
-    /// [`SetDoc`]
     Set(SetDoc),
-    /// [`UpdateDoc`]
     Update(UpdateDoc),
-    /// [`DeleteDoc`]
     Delete(DeleteDoc),
 }
 
 impl Write {
-    /// The document this write targets.
     #[must_use]
     pub fn path(&self) -> &DocPath {
         match self {
@@ -153,8 +120,8 @@ impl Write {
         }
     }
 
-    /// The update time this write requires the document to still have, if it is
-    /// guarded. `Create` has no guard (it requires the document to be absent).
+    /// The update time the document must still have, if guarded. `Create` has no guard (it
+    /// requires the document to be absent).
     #[must_use]
     pub fn guard(&self) -> Option<&UpdateTime> {
         match self {

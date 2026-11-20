@@ -14,32 +14,27 @@ use super::path::DocPath;
 pub struct Timestamp(DateTime<Utc>);
 
 impl Timestamp {
-    /// Wraps a UTC datetime without losing precision.
     #[must_use]
     pub fn new(at: DateTime<Utc>) -> Self {
         Self(at)
     }
 
-    /// Builds from whole seconds since the Unix epoch plus nanoseconds
-    /// (`0..=999_999_999`, as in the Firestore protos); `None` if out of range.
+    /// `nanos` must be in `0..=999_999_999`, as in the Firestore protos.
     #[must_use]
     pub fn from_unix(seconds: i64, nanos: u32) -> Option<Self> {
         DateTime::from_timestamp(seconds, nanos).map(Self)
     }
 
-    /// The underlying UTC datetime.
     #[must_use]
     pub fn as_datetime(&self) -> DateTime<Utc> {
         self.0
     }
 
-    /// Whole seconds since the Unix epoch.
     #[must_use]
     pub fn seconds(&self) -> i64 {
         self.0.timestamp()
     }
 
-    /// Nanoseconds past the whole second.
     #[must_use]
     pub fn nanos(&self) -> u32 {
         self.0.timestamp_subsec_nanos()
@@ -47,8 +42,7 @@ impl Timestamp {
 }
 
 impl fmt::Display for Timestamp {
-    /// RFC 3339 in UTC (`Z`), with as many fractional digits as needed
-    /// (0, 3, 6 or 9) so the value round-trips exactly.
+    /// RFC 3339 in UTC with 0, 3, 6 or 9 fractional digits, so the value round-trips exactly.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0.to_rfc3339_opts(SecondsFormat::AutoSi, true))
     }
@@ -57,7 +51,6 @@ impl fmt::Display for Timestamp {
 impl FromStr for Timestamp {
     type Err = chrono::ParseError;
 
-    /// Parses RFC 3339 (any offset), normalising to UTC.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         DateTime::parse_from_rfc3339(s).map(|t| Self(t.with_timezone(&Utc)))
     }
@@ -68,13 +61,11 @@ impl FromStr for Timestamp {
 pub struct UpdateTime(Timestamp);
 
 impl UpdateTime {
-    /// Wraps a timestamp as an update time.
     #[must_use]
     pub fn new(at: Timestamp) -> Self {
         Self(at)
     }
 
-    /// The wrapped timestamp.
     #[must_use]
     pub fn timestamp(&self) -> Timestamp {
         self.0
@@ -95,18 +86,14 @@ impl FromStr for UpdateTime {
     }
 }
 
-/// Why a latitude/longitude pair is not a valid [`GeoPoint`].
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum GeoPointError {
-    /// Latitude outside `[-90, 90]` (or NaN).
     #[error("latitude {0} is out of range [-90, 90]")]
     Latitude(f64),
-    /// Longitude outside `[-180, 180]` (or NaN).
     #[error("longitude {0} is out of range [-180, 180]")]
     Longitude(f64),
 }
 
-/// A geographic point with validated coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GeoPoint {
     lat: f64,
@@ -126,34 +113,29 @@ impl GeoPoint {
         }
     }
 
-    /// Latitude in degrees.
     #[must_use]
     pub fn lat(&self) -> f64 {
         self.lat
     }
 
-    /// Longitude in degrees.
     #[must_use]
     pub fn lng(&self) -> f64 {
         self.lng
     }
 }
 
-/// Why a string is not a [`DocResourceName`].
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error(
     "`{0}` is not a full document resource name (projects/<project>/databases/<database>/documents/<collection>/<doc>)"
 )]
 pub struct ResourceNameError(String);
 
-/// The full resource name of a document in some database, as Firestore stores a
-/// reference: `projects/P/databases/D/documents/users/u1`. Held by
-/// [`Value::ForeignRef`] for references that point outside the database being read.
+/// A document's full resource name (`projects/P/databases/D/documents/users/u1`), as Firestore
+/// stores references. [`Value::ForeignRef`] holds the ones outside the database being read.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DocResourceName(String);
 
 impl DocResourceName {
-    /// The name as Firestore writes it.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -169,7 +151,6 @@ impl fmt::Display for DocResourceName {
 impl FromStr for DocResourceName {
     type Err = ResourceNameError;
 
-    /// Accepts `projects/<p>/databases/<d>/documents/<document path>`.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parts = s
             .strip_prefix("projects/")
@@ -184,36 +165,23 @@ impl FromStr for DocResourceName {
     }
 }
 
-/// The fields of a document or map value, ordered by key.
 pub type Fields = BTreeMap<String, Value>;
 
-/// One Firestore value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
-    /// `null`.
     Null,
-    /// A boolean.
     Bool(bool),
-    /// A 64-bit integer.
     Int(i64),
-    /// A double-precision float.
     Double(f64),
-    /// A UTF-8 string.
     String(String),
-    /// A timestamp.
     Timestamp(Timestamp),
-    /// Raw bytes.
     Bytes(Vec<u8>),
-    /// A reference to another document in the same database.
+    /// A reference within the database being read.
     Ref(DocPath),
-    /// A reference to a document in another database or project, kept as its full
-    /// resource name.
+    /// A reference into another database or project, kept as its full resource name.
     ForeignRef(DocResourceName),
-    /// A geographic point.
     Geo(GeoPoint),
-    /// An ordered list of values.
     Array(Vec<Value>),
-    /// A nested map.
     Map(Fields),
 }
 

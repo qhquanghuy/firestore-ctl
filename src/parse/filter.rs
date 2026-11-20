@@ -8,10 +8,8 @@ use crate::domain::{Filter, Op};
 impl FromStr for Filter {
     type Err = ParseError;
 
-    /// Splits at the first whitespace-delimited word that is an operator. The field
-    /// is what precedes it: an unquoted field may not contain whitespace or
-    /// `< > ! = + - :` (backtick-quote such names). The value, parsed as a
-    /// [token](parse_token), is the rest; see [`Filter::new`] for the list rules.
+    /// Splits at the first whitespace-delimited word that is an operator; the rest is the
+    /// value, parsed as a [token](parse_token).
     fn from_str(s: &str) -> Result<Self, ParseError> {
         let trimmed = s.trim();
         let (field, op, value) = split(trimmed).ok_or_else(|| {
@@ -30,7 +28,6 @@ impl FromStr for Filter {
     }
 }
 
-/// `(field, operator, value)` around the first operator word, if there is one.
 fn split(s: &str) -> Option<(&str, Op, &str)> {
     unquoted(s, '`')
         .filter(|&(_, c)| c.is_whitespace())
@@ -70,7 +67,7 @@ mod tests {
             Ok(Op::ArrayContains)
         );
         assert!("status active".parse::<Filter>().is_err());
-        assert!("id in a".parse::<Filter>().is_err()); // `in` needs a list
+        assert!("id in a".parse::<Filter>().is_err());
     }
 
     #[test]

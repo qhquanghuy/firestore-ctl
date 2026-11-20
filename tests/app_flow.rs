@@ -47,7 +47,6 @@ fn ctx_writable() -> Context {
     ctx(Some("d"), default_target())
 }
 
-/// Authorizes `req` under `ctx`, then runs it: the flow `main` follows.
 async fn exec(ctx: &Context, fs: &FakeFirestore, req: Request) -> Result<Output, AppError> {
     run(fs, authorize(ctx, req)?).await
 }

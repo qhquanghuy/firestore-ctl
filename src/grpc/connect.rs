@@ -24,34 +24,25 @@ use tokio::time::timeout;
 use crate::domain::DbTarget;
 use crate::port::GatewayError;
 
-/// Production Firestore.
 const GOOGLE_URL: &str = "https://firestore.googleapis.com";
-/// How long fetching credentials may take.
 const STEP_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long opening the channel may take.
 const CHANNEL_TIMEOUT: Duration = Duration::from_secs(5);
-/// The longest any single call (a stream included, start to last message) may take.
+/// Applies to a whole stream, start to last message.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(60);
-/// The header Google's gRPC frontends route on.
 const ROUTING_HEADER: &str = "x-goog-request-params";
 
-/// The `google-cloud-resource-prefix` header value: names the database every request
-/// belongs to, so a named database is never silently replaced by `(default)`.
+/// Names the database every request belongs to, so a named one is never replaced by `(default)`.
 pub fn resource_prefix(t: &DbTarget) -> String {
     t.database_path()
 }
 
-/// Where requests go and how they authenticate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Endpoint {
-    /// The local emulator at this URL, authenticated as its `owner` user.
     Emulator(String),
-    /// Production Firestore, authenticated with Google credentials.
     Google,
 }
 
-/// The endpoint chosen by the environment: the emulator when
-/// `FIRESTORE_EMULATOR_HOST` is set and non-empty, else production.
+/// The emulator when `FIRESTORE_EMULATOR_HOST` is set and non-empty, else production.
 pub fn endpoint(env: impl Fn(&str) -> Option<String>) -> Endpoint {
     env("FIRESTORE_EMULATOR_HOST")
         .map(|host| host.trim().to_owned())
@@ -80,7 +71,6 @@ pub fn routing_param(key: &str, value: &str) -> String {
     format!("{key}={encoded}")
 }
 
-/// Wraps `message` in a request carrying the routing entry `key=value`.
 pub fn routed<T>(message: T, key: &str, value: &str) -> Request<T> {
     let mut request = Request::new(message);
     // The entry is percent-encoded ASCII, so this cannot fail; if it somehow did, the
@@ -95,7 +85,6 @@ fn other(message: impl Into<String>) -> GatewayError {
     GatewayError::Other(message.into())
 }
 
-/// The error and its causes, innermost last: `transport error: tcp connect error: ...`.
 fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
     std::iter::successors(Some(e), |e| e.source())
         .map(ToString::to_string)
@@ -158,12 +147,10 @@ impl CredentialsProvider for StaticBearer {
     }
 }
 
-/// Why a credential source produced no token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CredentialFailure {
     reason: String,
-    /// The failure looks like a network problem (timeout, unreachable token endpoint)
-    /// rather than a rejected or missing login.
+    /// The failure looks like a network problem rather than a rejected or missing login.
     network: bool,
 }
 
@@ -176,7 +163,6 @@ impl CredentialFailure {
     }
 }
 
-/// Runs `step` for at most [`STEP_TIMEOUT`].
 async fn within<T>(
     step: impl Future<Output = Result<T, CredentialFailure>>,
 ) -> Result<T, CredentialFailure> {
@@ -228,7 +214,6 @@ fn gcloud_failure(stderr: &str) -> CredentialFailure {
     }
 }
 
-/// The token `gcloud auth print-access-token` prints, fetched once.
 async fn gcloud_headers() -> Result<GoogleAuthHeaders, CredentialFailure> {
     let out = Command::new("gcloud")
         .args(["auth", "print-access-token"])
@@ -259,11 +244,10 @@ fn well_known_adc_file(env: &impl Fn(&str) -> Option<String>) -> Option<PathBuf>
         .map(|home| PathBuf::from(home).join(".config/gcloud/application_default_credentials.json"))
 }
 
-/// Whether google-cloud-auth would find Application Default Credentials here (it reads
-/// exactly these places): a key file named by
-/// `GOOGLE_APPLICATION_CREDENTIALS`, the well-known login file, or a Google-hosted
-/// environment (whose metadata server is not probed). When none does, trying ADC would
-/// only wait on a metadata server that is not there.
+/// Whether google-cloud-auth would find ADC (it reads exactly these places): a key file named
+/// by `GOOGLE_APPLICATION_CREDENTIALS`, the well-known login file, or a Google-hosted
+/// environment (whose metadata server is not probed, so trying ADC elsewhere would only wait
+/// on a server that is not there).
 fn adc_available(
     env: impl Fn(&str) -> Option<String>,
     is_file: impl Fn(&Path) -> bool,
@@ -281,7 +265,6 @@ fn adc_available(
         || well_known_adc_file(&env).is_some_and(|file| is_file(&file))
 }
 
-/// Whether this machine reports itself as Google-hosted (DMI product name).
 fn on_gce() -> bool {
     std::fs::read_to_string("/sys/class/dmi/id/product_name")
         .is_ok_and(|name| name.trim().starts_with("Google"))
@@ -305,15 +288,11 @@ fn credentials_error(source: CredentialSource, failure: &CredentialFailure) -> G
 /// identity `gcloud` happens to hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CredentialSource {
-    /// Application Default Credentials.
     Adc,
-    /// `gcloud auth print-access-token`.
     Gcloud,
 }
 
 impl CredentialSource {
-    /// ADC when it can exist on this machine (see [`adc_available`]); `gcloud` only when
-    /// there is no ADC source at all.
     fn choose(adc_possible: bool) -> Self {
         if adc_possible {
             Self::Adc
@@ -322,7 +301,6 @@ impl CredentialSource {
         }
     }
 
-    /// How this source is named in an error.
     fn name(self) -> &'static str {
         match self {
             Self::Adc => "Application Default Credentials",
@@ -331,7 +309,6 @@ impl CredentialSource {
     }
 }
 
-/// Google credentials from the one source [`CredentialSource::choose`] picks.
 async fn google_headers() -> Result<GoogleAuthHeaders, GatewayError> {
     let adc_possible = adc_available(|name| std::env::var(name).ok(), Path::is_file, on_gce());
     let source = CredentialSource::choose(adc_possible);
@@ -342,13 +319,12 @@ async fn google_headers() -> Result<GoogleAuthHeaders, GatewayError> {
     .map_err(|failure| credentials_error(source, &failure))
 }
 
-/// Opens the data client for `t` on `endpoint`. Every request it makes carries
-/// `google-cloud-resource-prefix: projects/P/databases/D`, and no call (stream
-/// included) may take longer than [`CALL_TIMEOUT`].
+/// Every request carries `google-cloud-resource-prefix: projects/P/databases/D`, and no call
+/// (stream included) may take longer than [`CALL_TIMEOUT`].
 ///
 /// # Errors
-/// [`GatewayError::Auth`] if no credentials work; [`GatewayError::Other`] if Firestore
-/// (or Google's token endpoint) cannot be reached. Takes at most 15 seconds: the credential
+/// [`GatewayError::Auth`] if no credentials work; [`GatewayError::Other`] if Firestore (or
+/// Google's token endpoint) cannot be reached. Takes at most 15 seconds: the credential
 /// source gets ten, the channel five.
 pub async fn open(
     t: &DbTarget,
@@ -541,7 +517,6 @@ mod tests {
     fn gcloud_is_used_only_when_no_adc_source_exists() {
         assert_eq!(CredentialSource::choose(true), CredentialSource::Adc);
         assert_eq!(CredentialSource::choose(false), CredentialSource::Gcloud);
-        // the decision follows what is on the machine
         let none = |_: &Path| false;
         let key = env(&[("GOOGLE_APPLICATION_CREDENTIALS", "/k.json")]);
         assert_eq!(

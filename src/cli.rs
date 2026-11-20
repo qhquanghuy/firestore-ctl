@@ -25,10 +25,8 @@ use crate::domain::{
 use crate::parse::{parse_field, unquoted};
 use crate::render::{Format, Layout, RenderOpts, Typing};
 
-/// `query` returns at most this many documents unless `--limit` or `--all` says otherwise.
 const DEFAULT_LIMIT: NonZeroU32 = NonZeroU32::new(100).unwrap();
 
-/// Pointer from every subcommand's `--help` to the full reference in `fsq --help`.
 const SEE_ROOT_HELP: &str =
     "Value syntax, field quoting, typed JSON tags and exit codes: run `fsq --help`.";
 
@@ -131,7 +129,6 @@ pub struct Cli {
     pub cmd: Cmd,
 }
 
-/// Which database to talk to.
 #[derive(Debug, Clone, Args)]
 #[command(next_help_heading = "Global options")]
 pub struct ConnArgs {
@@ -146,9 +143,8 @@ pub struct ConnArgs {
 }
 
 impl ConnArgs {
-    /// The database addressed: flags first, then the `FSQ_PROJECT` / `FSQ_DATABASE`
-    /// values `env` yields (empty ones count as unset), then `(default)` for the
-    /// database. `None` when no project is given anywhere.
+    /// Flags first, then `FSQ_PROJECT` / `FSQ_DATABASE` from `env` (empty counts as unset), then
+    /// `(default)` for the database. `None` when no project is given anywhere.
     ///
     /// # Errors
     /// A message naming the variable when its value is not a valid id.
@@ -172,7 +168,6 @@ impl ConnArgs {
     }
 }
 
-/// The shells `fsq completions` knows how to enable completion in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum CompletionShell {
     /// Bash.
@@ -182,7 +177,6 @@ pub enum CompletionShell {
 }
 
 impl CompletionShell {
-    /// The value of `FSQ_COMPLETE` that selects this shell.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
@@ -192,7 +186,6 @@ impl CompletionShell {
     }
 }
 
-/// `--format` values.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum FormatArg {
     /// Human-readable table.
@@ -203,7 +196,6 @@ enum FormatArg {
     Jsonl,
 }
 
-/// How results are printed.
 #[derive(Debug, Clone, Args)]
 #[command(next_help_heading = "Global options")]
 pub struct OutArgs {
@@ -222,7 +214,6 @@ pub struct OutArgs {
 }
 
 impl OutArgs {
-    /// The output options for a terminal (`is_tty`) or a pipe.
     #[must_use]
     pub fn render_opts(&self, is_tty: bool) -> RenderOpts {
         let format = self.format.map(|f| match f {
@@ -244,14 +235,10 @@ impl OutArgs {
     }
 }
 
-/// Where `set --data` reads its JSON from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataArg {
-    /// The argument itself.
     Inline(String),
-    /// `@path`: a file.
     File(PathBuf),
-    /// `-`: standard input.
     Stdin,
 }
 
@@ -302,7 +289,6 @@ impl FromStr for FieldList {
     }
 }
 
-/// Where to look and what to keep: shared by `query` and `count`.
 #[derive(Debug, Clone, Args)]
 pub struct Selection {
     /// Collection to read, e.g. `users` or `users/u1/orders`. With --group: optionally
@@ -321,7 +307,6 @@ pub struct Selection {
 }
 
 impl Selection {
-    /// The scope the path and --group describe.
     fn scope(self) -> Result<(Scope, Vec<Filter>), AppError> {
         let scope = match (self.group, self.path) {
             (None, Some(AnyPath::Collection(c))) => Ok(Scope::Collection(c)),
@@ -343,7 +328,6 @@ impl Selection {
     }
 }
 
-/// The commands.
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
     /// Print one document.
@@ -462,7 +446,6 @@ pub enum Cmd {
 }
 
 impl Cmd {
-    /// Whether the command changes data (and so needs write authorization).
     #[must_use]
     pub fn is_write(&self) -> bool {
         match self {
@@ -478,8 +461,8 @@ impl Cmd {
 }
 
 impl Cmd {
-    /// Whether this is a `query` that took the default document limit (neither `--limit`
-    /// nor `--all`), so its result may have been cut short without the user asking.
+    /// A `query` that took the default document limit (neither `--limit` nor `--all`), so its
+    /// result may have been cut short without the user asking.
     #[must_use]
     pub fn uses_default_limit(&self) -> bool {
         matches!(
@@ -493,8 +476,8 @@ impl Cmd {
     }
 }
 
-/// The stderr note for a `query` that ran with the default limit ([`Cmd::uses_default_limit`])
-/// and returned exactly that many documents, so there may be more. `None` otherwise.
+/// The stderr note for a default-limit `query` ([`Cmd::uses_default_limit`]) that returned
+/// exactly that many documents, so there may be more.
 #[must_use]
 pub fn truncation_note(default_limit_used: bool, output: &Output) -> Option<String> {
     match output {
@@ -513,7 +496,6 @@ fn guard(since: Option<UpdateTime>) -> Guard {
     since.map_or(Guard::None, Guard::UnchangedSince)
 }
 
-/// The JSON text `--data` names.
 fn read_data(data: DataArg, mut stdin: impl Read) -> Result<String, AppError> {
     let io_error = |what: String, e: std::io::Error| AppError::Input(format!("{what}: {e}"));
     match data {
@@ -530,15 +512,11 @@ fn read_data(data: DataArg, mut stdin: impl Read) -> Result<String, AppError> {
     }
 }
 
-/// A decoded `set --data`: the fields to write, and the `_updateTime` the input was
-/// read at when it is a full document.
 struct SetData {
     fields: Fields,
     read_at: Option<UpdateTime>,
 }
 
-/// What a printed-document marker (`_plain`, `_select`) in `set --data` means for the
-/// write about to happen.
 fn check_markers(envelope: &Envelope, merge: bool) -> Result<(), AppError> {
     if envelope.plain {
         Err(AppError::Input(
@@ -617,15 +595,11 @@ fn aggregations(
 }
 
 impl Cli {
-    /// The request the command line describes. `stdin` is read only by `set --data -`.
+    /// `stdin` is read only by `set --data -`.
     ///
     /// # Errors
-    /// [`AppError::Input`] for input that parses but is wrong: `--data` that is
-    /// unreadable, not JSON, not valid typed JSON, names another document or is `--plain`
-    /// output or a `--select` projection that the write mode cannot take, a
-    /// document path where a collection is needed (or the reverse), or a repeated
-    /// `--sum`/`--avg` field. `completions` is not a request; callers handle it first
-    /// and it yields an input error here.
+    /// [`AppError::Input`] for input that parses but is wrong (bad `--data`, a path of the wrong
+    /// kind, a repeated `--sum`/`--avg` field), and for `completions`, which is not a request.
     pub fn into_request(self, stdin: impl Read) -> Result<Request, AppError> {
         match self.cmd {
             Cmd::Get { path } => Ok(Request::Get(path)),
@@ -1149,13 +1123,11 @@ mod tests {
         let guarded = Guard::UnchangedSince(t);
         assert_eq!(mode(&["--overwrite"]), SetMode::Overwrite(guarded));
         assert_eq!(mode(&["--merge"]), SetMode::Merge(guarded));
-        // --force skips the implicit guard
         assert_eq!(
             mode(&["--overwrite", "--force"]),
             SetMode::Overwrite(Guard::None)
         );
         assert_eq!(mode(&["--merge", "--force"]), SetMode::Merge(Guard::None));
-        // an explicit guard wins over the document's own time
         let other: UpdateTime = "2026-02-01T00:00:00Z".parse().unwrap();
         assert_eq!(
             mode(&[
@@ -1165,7 +1137,6 @@ mod tests {
             ]),
             SetMode::Overwrite(Guard::UnchangedSince(other))
         );
-        // create has no guard
         assert_eq!(mode(&[]), SetMode::Create);
     }
 
@@ -1235,7 +1206,6 @@ mod tests {
             truncation_note(true, &documents(100)),
             Some("note: showing the first 100 documents; use --limit N or --all\n".to_owned())
         );
-        // not at the limit, an explicit limit, or not a query: no note
         assert_eq!(truncation_note(true, &documents(99)), None);
         assert_eq!(truncation_note(true, &documents(0)), None);
         assert_eq!(truncation_note(false, &documents(100)), None);

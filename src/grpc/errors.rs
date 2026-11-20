@@ -6,13 +6,10 @@ use super::connect::CALL_TIMEOUT;
 use crate::domain::{DocPath, Write};
 use crate::port::GatewayError;
 
-/// Classifies a failed RPC.
-///
-/// `path` is the document the call was about (`get`, a single-document write), or
-/// `None` for queries and listings; it is what a missing or already-existing
-/// *document* is named by. A failed precondition is not classified here: whether it is
-/// a changed document depends on the write's guard (see [`write_error`]), and any
-/// other one is reported as a missing index only if its message says so.
+/// Classifies a failed RPC. `path` is the document the call was about (`None` for queries
+/// and listings); it names a missing or already-existing *document*. A failed precondition
+/// is classified by [`write_error`] (it depends on the write's guard); elsewhere it is a
+/// missing index only if its message says so.
 #[must_use]
 pub fn map_status(s: &Status, path: Option<&DocPath>) -> GatewayError {
     let message = s.message();
@@ -67,7 +64,6 @@ fn names_missing_database(message: &str) -> bool {
     lower.contains("does not exist") && !lower.contains("/documents/")
 }
 
-/// The first `https://` URL in `message`, without trailing sentence punctuation.
 fn first_https_url(message: &str) -> Option<String> {
     message
         .split_whitespace()

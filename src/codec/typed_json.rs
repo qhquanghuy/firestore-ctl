@@ -36,7 +36,6 @@ use crate::domain::field::FieldPath;
 use crate::domain::path::DocPath;
 use crate::domain::value::{DocResourceName, Fields, GeoPoint, Timestamp, UpdateTime, Value};
 
-/// Encodes a value as typed JSON.
 #[must_use]
 pub fn value_to_json(v: &Value) -> Json {
     match v {
@@ -67,8 +66,8 @@ fn map_to_json(fields: &Fields) -> Json {
     }
 }
 
-/// Encodes a document as `{"_path", "_updateTime", "data"}`; the top-level
-/// `data` object is the document's fields (not escaped like a map value).
+/// Encodes a document as `{"_path", "_updateTime", "data"}`; `data` holds the fields
+/// unescaped, unlike a map value.
 #[must_use]
 pub fn document_to_json(d: &Document) -> Json {
     json!({
@@ -78,55 +77,41 @@ pub fn document_to_json(d: &Document) -> Json {
     })
 }
 
-/// Decodes typed JSON into a value.
-///
 /// # Errors
 /// [`CodecError`] pointing at the first invalid node.
 pub fn value_from_json(j: &Json) -> Result<Value, CodecError> {
     decode(j, "")
 }
 
-/// A decoded `set --data` input.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Input {
-    /// The document's fields.
     pub fields: Fields,
-    /// What the input says about itself when it is a full document (the shape `get`
-    /// prints), `None` for bare data.
+    /// `None` for bare data.
     pub envelope: Option<Envelope>,
 }
 
-/// The top-level keys of a printed document besides its `data`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Envelope {
-    /// `_path`: the document the input was read from.
     pub path: Option<DocPath>,
-    /// `_updateTime`: when that document last changed.
     pub update_time: Option<UpdateTime>,
     /// `_plain` was present: the input is `--plain` output, which is lossy.
     pub plain: bool,
-    /// `_select`: the input is a `--select` projection holding only these fields.
     pub select: Option<Vec<FieldPath>>,
 }
 
-/// Reads `set --data` input.
+/// Reads `set --data` input. It is a *full document* (the shape `get` prints) only if it has
+/// `_path` or `_updateTime`: `data` is then required, and any other top-level key besides the
+/// markers `_plain` and `_select` is an error, not dropped. Anything else is bare data, so
+/// `{"data": {...}}` alone is a document with one field named `data`.
 ///
-/// The input is a *full document* (the shape `get` prints) only if it has a `_path` or
-/// an `_updateTime` key; its `data` object is then required, and any top-level key other
-/// than `_path`, `_updateTime`, `data` and the output markers `_plain` and `_select` is
-/// an error rather than being dropped (fields belong inside `data`). Anything else is
-/// bare data whose keys are the field names, so `{"data": {...}}` alone is a document
-/// with one field named `data`.
-///
-/// The markers are reserved top-level keys wherever they appear, so stripping `_path` and
-/// `_updateTime` from printed output does not hide where it came from: they are reported in
-/// the [`Envelope`] and are never fields. (To store a field named `_plain` or `_select`, use
-/// the full-document form and put it inside `data`.)
+/// The markers are reserved top-level keys wherever they appear and are reported in the
+/// [`Envelope`], never as fields (to store a field named `_plain` or `_select`, use the
+/// full-document form and put it inside `data`).
 ///
 /// # Errors
-/// [`CodecError`] if the input is not an object, a full document lacks an object
-/// `data`, has stray top-level keys or a malformed `_path`, `_updateTime` or
-/// `_select`, or a field fails to decode.
+/// [`CodecError`] if the input is not an object, a full document lacks an object `data`, has
+/// stray top-level keys or a malformed `_path`, `_updateTime` or `_select`, or a field fails
+/// to decode.
 pub fn parse_input(j: &Json) -> Result<Input, CodecError> {
     let top = j
         .as_object()
@@ -170,8 +155,6 @@ pub fn parse_input(j: &Json) -> Result<Input, CodecError> {
     })
 }
 
-/// The decoded `data` of a full document `top`; any other top-level key besides the
-/// envelope's is an error.
 fn full_document_fields(top: &Map<String, Json>) -> Result<Fields, CodecError> {
     if let Some(stray) = top.keys().find(|k| {
         !matches!(
@@ -192,7 +175,6 @@ fn full_document_fields(top: &Map<String, Json>) -> Result<Fields, CodecError> {
         .and_then(|data| decode_fields(data, "/data"))
 }
 
-/// The string at top-level `key`, parsed with `parse`; `None` when the key is absent.
 fn envelope_value<T>(
     top: &Map<String, Json>,
     key: &str,
@@ -208,7 +190,6 @@ fn envelope_value<T>(
         .transpose()
 }
 
-/// The field paths of a `_select` array.
 fn select_paths(j: &Json) -> Result<Vec<FieldPath>, CodecError> {
     j.as_array()
         .ok_or_else(|| CodecError::new("/_select", "must be an array of field paths"))?
@@ -226,7 +207,6 @@ fn select_paths(j: &Json) -> Result<Vec<FieldPath>, CodecError> {
         .collect()
 }
 
-/// Appends one escaped segment (RFC 6901) to a JSON pointer.
 fn child(at: &str, segment: &str) -> String {
     format!("{at}/{}", segment.replace('~', "~0").replace('/', "~1"))
 }

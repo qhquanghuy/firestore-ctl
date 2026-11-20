@@ -9,33 +9,21 @@ use super::path::{CollectionPath, DocPath};
 use super::value::Value;
 use thiserror::Error;
 
-/// A comparison operator in a `--where` filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
-    /// `==`
     Eq,
-    /// `!=`
     Ne,
-    /// `<`
     Lt,
-    /// `<=`
     Le,
-    /// `>`
     Gt,
-    /// `>=`
     Ge,
-    /// `in` (value is a list)
     In,
-    /// `not-in` (value is a list)
     NotIn,
-    /// `array-contains`
     ArrayContains,
-    /// `array-contains-any` (value is a list)
     ArrayContainsAny,
 }
 
 impl Op {
-    /// Every operator.
     pub const ALL: [Op; 10] = [
         Op::Eq,
         Op::Ne,
@@ -49,13 +37,11 @@ impl Op {
         Op::ArrayContainsAny,
     ];
 
-    /// The operator spelled `symbol` on the command line, if any.
     #[must_use]
     pub fn from_symbol(symbol: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|op| op.symbol() == symbol)
     }
 
-    /// The operator's command-line spelling.
     #[must_use]
     pub fn symbol(self) -> &'static str {
         match self {
@@ -72,7 +58,6 @@ impl Op {
         }
     }
 
-    /// Whether the operator compares against a list of values.
     #[must_use]
     pub fn takes_list(self) -> bool {
         matches!(self, Self::In | Self::NotIn | Self::ArrayContainsAny)
@@ -88,24 +73,20 @@ pub struct Filter {
     value: Value,
 }
 
-/// Why a field, operator and value do not form a valid [`Filter`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum FilterError {
-    /// The operator compares against a list but the value is not one.
     #[error("`{}` needs a list value like [a, b]", .0.symbol())]
     NeedsList(Op),
-    /// The operator compares against a list but the list is empty.
     #[error("`{}` needs a non-empty list", .0.symbol())]
     EmptyList(Op),
-    /// The operator takes a single value but the value is a list.
     #[error("`{}` does not take a list (quote it to match a string)", .0.symbol())]
     UnexpectedList(Op),
 }
 
 impl Filter {
     /// # Errors
-    /// [`FilterError`] if `value` is not a list for `in`/`not-in`/`array-contains-any`,
-    /// is a list for any other operator, or is an empty list.
+    /// [`FilterError`] if `value` is not a list for a list operator, is a list for any other
+    /// operator, or is an empty list.
     pub fn new(field: FieldPath, op: Op, value: Value) -> Result<Self, FilterError> {
         match (&value, op.takes_list()) {
             (Value::Array(items), true) if items.is_empty() => Err(FilterError::EmptyList(op)),
@@ -115,53 +96,41 @@ impl Filter {
         }
     }
 
-    /// The field compared.
     #[must_use]
     pub fn field(&self) -> &FieldPath {
         &self.field
     }
 
-    /// The comparison.
     #[must_use]
     pub fn op(&self) -> Op {
         self.op
     }
 
-    /// The right-hand side.
     #[must_use]
     pub fn value(&self) -> &Value {
         &self.value
     }
 }
 
-/// Sort direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
-    /// Smallest first.
     Asc,
-    /// Largest first.
     Desc,
 }
 
-/// One `--order-by` term.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrderBy {
-    /// The field sorted on.
     pub field: FieldPath,
-    /// The sort direction.
     pub direction: Direction,
 }
 
-/// Where a query looks for documents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
-    /// The documents directly in one collection.
     Collection(CollectionPath),
     /// Every collection named `id` at any depth, optionally only below `parent`.
     Group {
         /// Restrict to collections under this document; `None` searches the whole database.
         parent: Option<DocPath>,
-        /// The collection name matched at any depth.
         id: CollectionId,
     },
 }
@@ -177,47 +146,33 @@ impl From<NonZeroU32> for Limit {
 }
 
 impl Limit {
-    /// The count (at least 1).
     #[must_use]
     pub fn get(self) -> u32 {
         self.0.get()
     }
 }
 
-/// A fully specified document query.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
-    /// Where to look.
     pub scope: Scope,
     /// Conditions every result satisfies (AND).
     pub filters: Vec<Filter>,
-    /// Sort terms, most significant first.
     pub order: Vec<OrderBy>,
-    /// Maximum results; `None` for all.
     pub limit: Option<Limit>,
-    /// Results to skip.
     pub offset: u32,
-    /// Return only these fields; `None` for whole documents.
     pub select: Option<Vec<FieldPath>>,
 }
 
-/// One server-side aggregate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Aggregation {
-    /// Number of matching documents.
     Count,
-    /// Sum of a numeric field.
     Sum(FieldPath),
-    /// Average of a numeric field.
     Avg(FieldPath),
 }
 
-/// A query reduced to one or more aggregates.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AggregateQuery {
-    /// The documents aggregated over.
     pub query: Query,
-    /// The aggregates to compute.
     pub aggregations: NonEmptyVec<Aggregation>,
 }
 

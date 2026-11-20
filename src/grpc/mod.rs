@@ -29,17 +29,13 @@ use crate::port::{AggregateResult, Firestore, GatewayError, IndexInfo, Written};
 
 use self::errors::{map_status, write_error};
 
-/// Connects to the database `t`: the emulator when `FIRESTORE_EMULATOR_HOST` is set,
-/// else production. Credentials are Application Default Credentials where they can exist
-/// (a key file variable, the `gcloud auth application-default login` file, or a Google-hosted
-/// machine), else a `gcloud` access token; if ADC fails `gcloud` is tried too.
-///
-/// Connecting takes at most 25 seconds (ADC 10, `gcloud` 10, channel 5); every later
-/// call, streams included, is capped at 60 seconds.
+/// Connects to `t`: the emulator when `FIRESTORE_EMULATOR_HOST` is set, else production with
+/// Application Default Credentials (or a `gcloud` token when no ADC source exists). Connecting
+/// takes at most 15 seconds; every later call, streams included, is capped at 60.
 ///
 /// # Errors
-/// [`GatewayError::Auth`] if no credentials work, [`GatewayError::Other`] if Firestore
-/// or Google's token endpoint cannot be reached.
+/// [`GatewayError::Auth`] if no credentials work, [`GatewayError::Other`] if Firestore or
+/// Google's token endpoint cannot be reached.
 pub async fn connect(t: &DbTarget) -> Result<GrpcFirestore, GatewayError> {
     let endpoint = connect::endpoint(|name| std::env::var(name).ok());
     connect::open(t, &endpoint).await.map(|data| GrpcFirestore {
@@ -48,7 +44,6 @@ pub async fn connect(t: &DbTarget) -> Result<GrpcFirestore, GatewayError> {
     })
 }
 
-/// Firestore over gRPC, bound to one database.
 pub struct GrpcFirestore {
     target: DbTarget,
     data: GoogleApi<FirestoreClient<GoogleAuthMiddleware>>,
@@ -62,7 +57,6 @@ impl fmt::Debug for GrpcFirestore {
     }
 }
 
-/// Every message of a server stream, or the status that ended it.
 async fn drain<M>(mut stream: Streaming<M>) -> Result<Vec<M>, Status> {
     let mut messages = Vec::new();
     while let Some(message) = stream.message().await? {
@@ -94,7 +88,6 @@ where
 }
 
 impl GrpcFirestore {
-    /// The `database=` routing entry for calls that take a database name.
     fn by_database<T>(&self, message: T) -> Request<T> {
         connect::routed(message, "database", &self.target.database_path())
     }

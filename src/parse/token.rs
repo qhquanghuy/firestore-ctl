@@ -5,14 +5,12 @@ use itertools::Itertools;
 use super::{ParseError, unquoted};
 use crate::domain::{DocPath, Timestamp, Value};
 
-/// Parses one value token. Anything not recognised as a typed token is a string.
-///
-/// A `[...]` token yields [`Value::Array`]; callers decide whether a list is
-/// acceptable where they use the value.
+/// Anything not recognised as a typed token is a string. A `[...]` token yields
+/// [`Value::Array`]; callers decide whether a list is acceptable.
 ///
 /// # Errors
-/// [`ParseError`] for a malformed `ts:`/`ref:` token, quoted string or list,
-/// or an integer/float that does not fit.
+/// [`ParseError`] for a malformed `ts:`/`ref:` token, quoted string or list, or an
+/// integer/float that does not fit.
 pub fn parse_token(s: &str) -> Result<Value, ParseError> {
     match s {
         "null" => Ok(Value::Null),
@@ -70,7 +68,6 @@ fn quoted(token: &str, body: &str) -> Result<String, ParseError> {
     Err(ParseError::new(token, "unterminated quoted string"))
 }
 
-/// Parses the inside of `[...]` into typed elements split on commas outside quotes.
 fn list(token: &str, inner: &str) -> Result<Vec<Value>, ParseError> {
     if inner.trim().is_empty() {
         return Ok(Vec::new());
@@ -167,7 +164,6 @@ mod tests {
         assert_eq!(parse_token(".5"), Ok(Value::Double(0.5)));
         assert_eq!(parse_token("5."), Ok(Value::Double(5.0)));
         assert_eq!(parse_token("2E-2"), Ok(Value::Double(0.02)));
-        // not numbers: stay strings
         for s in [
             "+5",
             "+8190123456",
@@ -186,7 +182,7 @@ mod tests {
         ] {
             assert_eq!(parse_token(s), Ok(Value::String(s.into())), "{s:?}");
         }
-        // numeric-looking but unrepresentable: loud error instead of a silent string
+        // unrepresentable: an error, not a silent string
         assert!(parse_token("99999999999999999999").is_err());
         assert!(parse_token("1e999").is_err());
     }
@@ -246,7 +242,6 @@ mod tests {
         assert!(parse_token(r#"[5", 6"]"#).is_err());
         assert!(parse_token("[[a], b]").is_err());
         assert!(parse_token(r#"[a, "b]"#).is_err());
-        // not a list: stays a string
         assert_eq!(
             parse_token("[draft] foo"),
             Ok(Value::String("[draft] foo".into()))

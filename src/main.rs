@@ -16,8 +16,7 @@ use fsq::grpc;
 use fsq::policy::{PolicyError, WritePolicy};
 use fsq::render::{render, render_error};
 
-/// Writes `text` to stdout and returns the exit code for it. A closed pipe (`| head`) means
-/// the reader went away, which is not an error worth reporting.
+/// A closed pipe (`| head`) means the reader went away, which is not an error worth reporting.
 fn emit(text: &str) -> ExitCode {
     match io::stdout().write_all(text.as_bytes()) {
         Ok(()) => ExitCode::SUCCESS,
@@ -29,13 +28,12 @@ fn emit(text: &str) -> ExitCode {
     }
 }
 
-/// Prints `e` to stderr and returns its exit code.
 fn fail(e: &AppError, target: &DbTarget) -> ExitCode {
     eprint!("{}", render_error(e, target));
     exit_code(e)
 }
 
-/// The policy a command runs under. A malformed `FSQ_WRITABLE` only matters to writes:
+/// A malformed `FSQ_WRITABLE` only matters to writes:
 /// they fail with it, while reads (which need no policy) go ahead read-only.
 fn effective_policy(
     parsed: Result<WritePolicy, PolicyError>,
@@ -49,9 +47,8 @@ fn effective_policy(
 }
 
 fn main() -> ExitCode {
-    // Shell completion requests (`FSQ_COMPLETE=<shell>`) are answered, and the process exits,
-    // before anything else happens. This must run outside the async runtime: completers
-    // start their own.
+    // Answers shell completion requests and exits. Must run outside the async runtime:
+    // completers start their own.
     CompleteEnv::with_factory(Cli::command)
         .var(COMPLETE_VAR)
         .shells(shells())

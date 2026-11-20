@@ -11,11 +11,8 @@ const FIELD_HINT: &str =
 impl FromStr for FieldOp {
     type Err = ParseError;
 
-    /// Splits at the first `=` outside a backtick-quoted field; a `+` or `-` right
-    /// before it (ignoring spaces) makes it an array union or removal. An unquoted
-    /// field may not contain whitespace or `< > ! = + - :`. The value, trimmed, is
-    /// parsed as a [token](parse_token) and may not start with `=`; `+=`/`-=` need a
-    /// non-empty list or a single element.
+    /// Splits at the first `=` outside a backtick-quoted field; a `+` or `-` right before it
+    /// (ignoring spaces) makes it an array union or removal. The value may not start with `=`.
     fn from_str(s: &str) -> Result<Self, ParseError> {
         let fail = |reason: String| ParseError::new(s, reason);
         let (eq, _) = unquoted(s, '`').find(|&(_, c)| c == '=').ok_or_else(|| {
@@ -41,7 +38,6 @@ impl FromStr for FieldOp {
     }
 }
 
-/// A list's elements, or a lone value as a one-element list; never empty.
 fn elements(input: &str, text: &str, value: Value) -> Result<Vec<Value>, ParseError> {
     let items = match value {
         Value::Array(items) => items,
@@ -130,14 +126,7 @@ mod tests {
 
     #[test]
     fn ambiguous_unquoted_fields_are_rejected() {
-        for bad in [
-            "my-field=3", // needs backticks
-            "x>=3",
-            "x!=3",
-            "x<=3",
-            "a b=1",
-            "a:b=1",
-        ] {
+        for bad in ["my-field=3", "x>=3", "x!=3", "x<=3", "a b=1", "a:b=1"] {
             assert!(bad.parse::<FieldOp>().is_err(), "{bad}");
         }
         let e = "x>=3".parse::<FieldOp>().unwrap_err();

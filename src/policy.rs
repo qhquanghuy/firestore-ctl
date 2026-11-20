@@ -9,12 +9,9 @@ use thiserror::Error;
 
 use crate::domain::{DatabaseId, DbTarget, IdError, ProjectId};
 
-/// One `FSQ_WRITABLE` entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum WritableEntry {
-    /// `database`: that database in any project.
     AnyProject(DatabaseId),
-    /// `project/database`: exactly that database.
     Exact(DbTarget),
 }
 
@@ -27,26 +24,17 @@ impl WritableEntry {
     }
 }
 
-/// Why `FSQ_WRITABLE` could not be parsed. Meant for the human who set it.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PolicyError {
-    /// An entry used a wildcard.
     #[error("FSQ_WRITABLE entry `{0}`: wildcards are not allowed; list databases explicitly")]
     Wildcard(String),
-    /// A bare `(default)` would match every project's default database.
     #[error(
         "FSQ_WRITABLE entry `(default)`: name the project, e.g. `my-project/(default)`; \
          a bare `(default)` would allow writes to every project's default database"
     )]
     BareDefault,
-    /// An entry was not `database` or `project/database`.
     #[error("FSQ_WRITABLE entry `{entry}`: {reason}")]
-    Invalid {
-        /// The offending entry.
-        entry: String,
-        /// Which identifier was invalid and why.
-        reason: IdError,
-    },
+    Invalid { entry: String, reason: IdError },
 }
 
 impl FromStr for WritableEntry {
@@ -73,14 +61,13 @@ impl FromStr for WritableEntry {
     }
 }
 
-/// The databases writes are allowed on. Empty (the default) means read-only.
+/// Empty (the default) means read-only.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WritePolicy(Vec<WritableEntry>);
 
 impl WritePolicy {
-    /// Parses the value of `FSQ_WRITABLE`: comma-separated `database` or
-    /// `project/database` entries; whitespace around entries and empty entries are
-    /// ignored. Unset or empty yields a read-only policy.
+    /// Comma-separated `database` or `project/database` entries; blanks are ignored.
+    /// Unset or empty yields a read-only policy.
     ///
     /// # Errors
     /// [`PolicyError`] for a wildcard or an invalid project or database id.
@@ -94,8 +81,6 @@ impl WritePolicy {
             .map(Self)
     }
 
-    /// Grants write access to `t` if an entry matches it.
-    ///
     /// # Errors
     /// [`WriteDenied`] when no entry matches (including when the policy is empty).
     pub fn authorize(&self, t: &DbTarget) -> Result<WriteAccess, WriteDenied> {
@@ -110,8 +95,7 @@ impl WritePolicy {
     }
 }
 
-/// Proof that writes to one database are allowed. Only [`WritePolicy::authorize`]
-/// creates one.
+/// Proof that writes to one database are allowed; only [`WritePolicy::authorize`] creates one.
 #[derive(Debug, Clone)]
 pub struct WriteAccess {
     target: DbTarget,
@@ -119,20 +103,17 @@ pub struct WriteAccess {
 }
 
 impl WriteAccess {
-    /// The database this grant covers.
     #[must_use]
     pub fn target(&self) -> &DbTarget {
         &self.target
     }
 }
 
-/// A write was refused because the database is not writable.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("writes are disabled for database {}/{}", .0.project, .0.database)]
 pub struct WriteDenied(DbTarget);
 
 impl WriteDenied {
-    /// The database that refused the write.
     #[must_use]
     pub fn target(&self) -> &DbTarget {
         &self.0

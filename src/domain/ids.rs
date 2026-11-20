@@ -5,23 +5,14 @@ use std::str::FromStr;
 
 use thiserror::Error;
 
-/// Why a string is not a valid identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Error)]
 pub enum IdError {
-    /// The identifier was the empty string.
     #[error("{kind} must not be empty")]
-    Empty {
-        /// What was being parsed (e.g. "project id").
-        kind: &'static str,
-    },
-    /// The identifier was non-empty but broke the format rule.
+    Empty { kind: &'static str },
     #[error("invalid {kind} `{input}`: {expected}")]
     Invalid {
-        /// What was being parsed (e.g. "project id").
         kind: &'static str,
-        /// The rejected text.
         input: String,
-        /// The rule the text broke.
         expected: &'static str,
     },
 }
@@ -54,8 +45,7 @@ fn is_database_id(s: &str) -> bool {
     s == DEFAULT_DATABASE || is_lowercase_slug(s)
 }
 
-/// A single path segment: no `/`, and not a Firestore-reserved name
-/// (`.`, `..`, or anything of the form `__x__`).
+/// No `/`, and not a Firestore-reserved name (`.`, `..`, or `__x__`).
 fn is_segment(s: &str) -> bool {
     let reserved =
         s == "." || s == ".." || (s.len() >= 4 && s.starts_with("__") && s.ends_with("__"));
@@ -71,7 +61,6 @@ macro_rules! id_newtype {
         pub struct $name(String);
 
         impl $name {
-            /// The identifier as written.
             #[must_use]
             pub fn as_str(&self) -> &str {
                 &self.0
@@ -111,7 +100,6 @@ id_newtype!(
 );
 
 id_newtype!(
-    /// A collection name: one non-empty path segment.
     CollectionId,
     "collection id",
     "must not contain `/`, be `.` or `..`, or match `__x__`",
@@ -119,7 +107,6 @@ id_newtype!(
 );
 
 id_newtype!(
-    /// A document name: one non-empty path segment.
     DocId,
     "document id",
     "must not contain `/`, be `.` or `..`, or match `__x__`",
@@ -127,18 +114,14 @@ id_newtype!(
 );
 
 impl Default for DatabaseId {
-    /// The `(default)` database.
     fn default() -> Self {
         Self(DEFAULT_DATABASE.to_owned())
     }
 }
 
-/// A fully resolved Firestore database: which project and which database in it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DbTarget {
-    /// The Google Cloud project.
     pub project: ProjectId,
-    /// The database within the project.
     pub database: DatabaseId,
 }
 

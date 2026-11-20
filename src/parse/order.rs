@@ -8,9 +8,7 @@ use crate::domain::{Direction, OrderBy};
 impl FromStr for OrderBy {
     type Err = ParseError;
 
-    /// `field` sorts ascending; `field:asc` / `field:desc` is explicit. The direction
-    /// follows the last `:` outside backticks. An unquoted field may not contain
-    /// whitespace or `< > ! = + - :` (backtick-quote such names).
+    /// No direction means ascending; the direction follows the last `:` outside backticks.
     fn from_str(s: &str) -> Result<Self, ParseError> {
         let trimmed = s.trim();
         let (field, direction) = match unquoted(trimmed, '`').filter(|&(_, c)| c == ':').last() {

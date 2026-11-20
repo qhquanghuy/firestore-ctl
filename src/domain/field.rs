@@ -6,36 +6,24 @@ use std::str::FromStr;
 use itertools::Itertools;
 use thiserror::Error;
 
-/// Why a string is not a valid field path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Error)]
 pub enum FieldPathError {
-    /// The path had no segments.
     #[error("field path must not be empty")]
     Empty,
-    /// The segment at this zero-based position was empty (e.g. `a..b`).
     #[error("field path `{input}` has an empty segment at position {position}")]
     EmptySegment {
         /// The rejected path (for [`FieldPath::from_segments`], the segments joined by `.`).
         input: String,
-        /// Zero-based segment position.
         position: usize,
     },
-    /// A backtick-quoted segment was never closed.
     #[error("field path `{0}` has an unterminated backtick quote")]
     UnterminatedQuote(String),
-    /// A backtick appeared inside an unquoted segment, or text followed a closing quote.
     #[error("field path `{0}` has an unexpected backtick or text after a quoted segment")]
     Unexpected(String),
-    /// A backslash inside a quoted segment was followed by something other than `` ` `` or `\`.
     #[error(
         "field path `{input}` has an invalid escape `\\{escape}`; only \\` and \\\\ are allowed"
     )]
-    InvalidEscape {
-        /// The rejected path.
-        input: String,
-        /// The character after the backslash.
-        escape: char,
-    },
+    InvalidEscape { input: String, escape: char },
 }
 
 /// A path to a (possibly nested) field: a non-empty list of non-empty segments.
@@ -43,12 +31,11 @@ pub enum FieldPathError {
 pub struct FieldPath(Vec<String>);
 
 impl FieldPath {
-    /// Builds a path from raw segments (e.g. map keys that may contain dots),
-    /// with no quoting or parsing involved.
+    /// Builds a path from raw segments (e.g. map keys containing dots); no quoting or parsing.
     ///
     /// # Errors
-    /// [`FieldPathError::Empty`] if there are no segments, or
-    /// [`FieldPathError::EmptySegment`] if any segment is empty.
+    /// [`FieldPathError::Empty`] if there are no segments, [`FieldPathError::EmptySegment`] if
+    /// any segment is empty.
     pub fn from_segments(
         segments: impl IntoIterator<Item = String>,
     ) -> Result<Self, FieldPathError> {
@@ -56,7 +43,6 @@ impl FieldPath {
         non_empty_segments(segments, |segs| segs.iter().join("."))
     }
 
-    /// The unquoted, unescaped segments, outermost first.
     #[must_use]
     pub fn segments(&self) -> &[String] {
         &self.0
@@ -76,8 +62,6 @@ impl fmt::Display for FieldPath {
     }
 }
 
-/// Checks the invariant (at least one segment, none empty); `describe` renders
-/// the input for error messages.
 fn non_empty_segments(
     segments: Vec<String>,
     describe: impl FnOnce(&[String]) -> String,
@@ -111,7 +95,6 @@ fn quote_if_needed(segment: &str) -> String {
     }
 }
 
-/// Reads one segment off the front of `rest`; returns it with the text after it.
 fn take_segment<'a>(rest: &'a str, input: &str) -> Result<(String, &'a str), FieldPathError> {
     if let Some(quoted) = rest.strip_prefix('`') {
         return take_quoted(quoted, input);
@@ -124,8 +107,7 @@ fn take_segment<'a>(rest: &'a str, input: &str) -> Result<(String, &'a str), Fie
     }
 }
 
-/// Reads a quoted segment body (after the opening backtick) up to the closing
-/// backtick. Only `` \` `` and `\\` are valid escapes.
+/// Only `` \` `` and `\\` are valid escapes.
 fn take_quoted<'a>(body: &'a str, input: &str) -> Result<(String, &'a str), FieldPathError> {
     let mut out = String::new();
     let mut chars = body.char_indices();

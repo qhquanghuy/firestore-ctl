@@ -71,7 +71,6 @@ fn timestamp(ts: Timestamp) -> prost_types::Timestamp {
     }
 }
 
-/// An update time as a proto timestamp, nanoseconds included.
 pub fn update_time(u: &UpdateTime) -> prost_types::Timestamp {
     timestamp(u.timestamp())
 }
@@ -80,8 +79,6 @@ pub fn doc_name(p: &DocPath, t: &DbTarget) -> String {
     format!("{}/{p}", t.documents_root())
 }
 
-/// The request parent for a collection (or group) under `parent`: that document's
-/// resource name, or the documents root.
 pub fn parent_name(parent: Option<&DocPath>, t: &DbTarget) -> String {
     parent.map_or_else(|| t.documents_root(), |p| doc_name(p, t))
 }
@@ -96,7 +93,6 @@ fn clamp(n: u32) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
 }
 
-/// The request parent and structured query for `q`.
 pub fn structured_query(q: &Query, t: &DbTarget) -> (String, proto::StructuredQuery) {
     let (parent, from) = match &q.scope {
         Scope::Collection(c) => (
@@ -138,7 +134,6 @@ fn order(o: &OrderBy) -> ProtoOrder {
     }
 }
 
-/// No filter, the single filter, or all of them `AND`ed.
 fn where_clause(filters: &[Filter], t: &DbTarget) -> Option<ProtoFilter> {
     match filters {
         [] => None,
@@ -193,12 +188,10 @@ fn field_operator(op: Op) -> field_filter::Operator {
     }
 }
 
-/// The alias under which aggregation number `i` is requested and read back.
 pub fn aggregation_alias(i: usize) -> String {
     format!("agg_{i}")
 }
 
-/// The request parent and aggregation query for `q`; aggregation `i` has alias `agg_i`.
 pub fn aggregation_query(
     q: &AggregateQuery,
     t: &DbTarget,
@@ -247,11 +240,9 @@ fn guarded(guard: Guard, default: Option<ConditionType>) -> Option<proto::Precon
     }
 }
 
-/// The proto write for `w`, with the preconditions the port contract demands.
-///
 /// # Errors
-/// [`GatewayError::Other`] if a merged document has an empty field name, which has no
-/// field path.
+/// [`GatewayError::Other`] if a merged document has an empty field name, which has no field
+/// path.
 pub fn write(w: &Write, t: &DbTarget) -> Result<proto::Write, GatewayError> {
     match w {
         Write::Set(s) => set(s, t),

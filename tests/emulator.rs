@@ -3,10 +3,9 @@
 //! The tests that need the emulator are `#[ignore]`d (`is_local_accepts_only_loopback` is
 //! not and runs everywhere). Run them with
 //! `firebase emulators:exec --only firestore --project demo-fsq 'cargo nextest run --test emulator --run-ignored all'`.
-//! Each test clears its project through the emulator first, so the suite can be re-run.
-//! Each test uses its own `demo-` project, so tests do not see each other's documents,
-//! and refuses to run unless `FIRESTORE_EMULATOR_HOST` names a local address: these
-//! tests write, and must never reach a real project.
+//! Each test uses its own `demo-` project, cleared first so the suite can be re-run, and
+//! refuses to run unless `FIRESTORE_EMULATOR_HOST` names a local address: these tests write,
+//! and must never reach a real project.
 #![allow(clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeSet;
@@ -18,12 +17,10 @@ use assert_cmd::Command;
 use pretty_assertions::assert_eq;
 use serde_json::{Value as Json, json};
 
-/// One test's private project on the local emulator.
 struct Emulator {
     project: String,
 }
 
-/// Whether `host` (a `FIRESTORE_EMULATOR_HOST` value) is a loopback `host:port`.
 fn is_local(host: &str) -> bool {
     ["localhost:", "127.0.0.1:", "[::1]:"].iter().any(|prefix| {
         host.strip_prefix(prefix)
@@ -31,8 +28,6 @@ fn is_local(host: &str) -> bool {
     })
 }
 
-/// Deletes every document of `project` on the emulator at `host`, so a test starts from
-/// an empty database even when the emulator has run before.
 fn clear_project(host: &str, project: &str) {
     let request = format!(
         "DELETE /emulator/v1/projects/{project}/databases/(default)/documents HTTP/1.1\r\n\
@@ -64,8 +59,6 @@ fn clear_project(host: &str, project: &str) {
 }
 
 impl Emulator {
-    /// The project `demo-fsq-<name>` on the emulator. Fails the test when no local
-    /// emulator is configured.
     fn project(name: &str) -> Self {
         let host = std::env::var("FIRESTORE_EMULATOR_HOST").unwrap_or_default();
         assert!(
@@ -78,7 +71,6 @@ impl Emulator {
         Self { project }
     }
 
-    /// `fsq` pointed at this project, allowed to write to it.
     fn fsq(&self, args: &[&str]) -> Command {
         let mut cmd = Command::cargo_bin("fsq").expect("fsq binary builds");
         cmd.env_remove("FSQ_DATABASE")
@@ -90,13 +82,11 @@ impl Emulator {
         cmd
     }
 
-    /// Runs `fsq`, expecting exit 0, and returns its stdout.
     fn ok(&self, args: &[&str]) -> String {
         let out = self.fsq(args).assert().success().get_output().clone();
         String::from_utf8(out.stdout).expect("utf-8 output")
     }
 
-    /// Runs `fsq` with `stdin`, expecting exit 0, and returns its stdout.
     fn ok_with_stdin(&self, args: &[&str], stdin: &str) -> String {
         let out = self
             .fsq(args)
@@ -108,17 +98,14 @@ impl Emulator {
         String::from_utf8(out.stdout).expect("utf-8 output")
     }
 
-    /// Runs `fsq`, expecting exactly exit code `code`.
     fn fails_with(&self, args: &[&str], code: i32) {
         self.fsq(args).assert().code(code);
     }
 
-    /// The JSON `fsq args` prints.
     fn json(&self, args: &[&str]) -> Json {
         parse(&self.ok(args))
     }
 
-    /// Creates `path` from inline typed JSON.
     fn create(&self, path: &str, data: &Json) {
         self.ok(&["set", path, "--data", &data.to_string()]);
     }
@@ -128,7 +115,7 @@ fn parse(text: &str) -> Json {
     serde_json::from_str(text).unwrap_or_else(|e| panic!("not JSON ({e}): {text}"))
 }
 
-/// The strings of a JSON array, sorted (collection ids come in no particular order).
+/// Sorted: collection ids come in no particular order.
 fn names(array: &Json) -> Vec<&str> {
     array
         .as_array()
@@ -140,7 +127,6 @@ fn names(array: &Json) -> Vec<&str> {
         .collect()
 }
 
-/// The `_path`s of a JSON array of documents.
 fn paths(docs: &Json) -> Vec<&str> {
     docs.as_array()
         .expect("an array of documents")
@@ -186,7 +172,6 @@ fn typed_document_survives_get_then_set_overwrite() {
     let first_text = emu.ok(&["get", "things/t1"]);
     let first = parse(&first_text);
     assert_eq!(first["_path"], "things/t1");
-    // Every value was already canonical, so nothing changed on the way through.
     assert_eq!(first["data"], input);
     let data = &first["data"];
     assert_eq!(data["count"], 7);
@@ -197,10 +182,8 @@ fn typed_document_survives_get_then_set_overwrite() {
     assert_eq!(data["place"], json!({"$geo": {"lat": 1.5, "lng": -2.0}}));
     assert_eq!(data["nested"]["a"]["b"][1], json!({"$double": 2.0}));
     assert_eq!(data["escaped"], json!({"$map": {"$odd": 1}}));
-    // Piped output is compact: one line.
     assert_eq!(first_text.trim_end().lines().count(), 1);
 
-    // Feed the whole printed document back in.
     emu.ok_with_stdin(
         &["set", "things/t1", "--overwrite", "--data", "-"],
         &first_text,
@@ -281,7 +264,6 @@ fn guarded_writes_fail_with_precondition_failed_when_stale() {
     emu.fails_with(&["delete", "users/u1", "--if-unchanged-since", &old], 5);
     assert_eq!(emu.json(&["get", "users/u1"])["data"], json!({"n": 2}));
 
-    // The exact `_updateTime` printed by `get` is accepted.
     emu.ok(&[
         "update",
         "users/u1",
@@ -511,7 +493,6 @@ fn set_merge_combines_nested_maps_field_by_field() {
         json!({"address": {"city": "X", "zip": "1"}, "n": 1})
     );
 
-    // A stale guard fails; the exact `_updateTime` printed by `get` succeeds.
     let stale = merged["_updateTime"]
         .as_str()
         .expect("_updateTime")
@@ -546,7 +527,6 @@ fn set_merge_combines_nested_maps_field_by_field() {
     assert_eq!(emu.json(&["get", "users/u1"])["data"]["n"], 3);
 }
 
-/// The `_updateTime` of `path`.
 fn update_time(emu: &Emulator, path: &str) -> String {
     emu.json(&["get", path])["_updateTime"]
         .as_str()
@@ -559,7 +539,6 @@ fn update_time(emu: &Emulator, path: &str) -> String {
 fn writing_back_a_stale_document_fails_unless_forced() {
     let emu = Emulator::project("stale-input");
     emu.create("users/u1", &json!({"n": 1, "m": 1}));
-    // get -> (someone else changes it) -> edit -> set
     let read = emu.ok(&["get", "users/u1"]);
     emu.ok(&["update", "users/u1", "--set", "n=2"]);
     let edited = read.replace(r#""n":1"#, r#""n":9"#);
@@ -576,7 +555,6 @@ fn writing_back_a_stale_document_fails_unless_forced() {
         json!({"n": 2, "m": 1})
     );
 
-    // --force skips the implicit guard
     emu.ok_with_stdin(
         &["set", "users/u1", "--overwrite", "--force", "--data", "-"],
         &edited,
@@ -586,11 +564,9 @@ fn writing_back_a_stale_document_fails_unless_forced() {
         json!({"n": 9, "m": 1})
     );
 
-    // an unchanged document writes back fine, with no flag at all
     let fresh = emu.ok(&["get", "users/u1"]);
     emu.ok_with_stdin(&["set", "users/u1", "--merge", "--data", "-"], &fresh);
 
-    // an explicit guard wins over the document's own time
     let current = update_time(&emu, "users/u1");
     emu.fsq(&[
         "set",
@@ -649,7 +625,6 @@ fn a_select_projection_can_be_merged_but_not_overwritten() {
     assert_eq!(projected[0]["_select"], json!(["a", "b"]));
     assert_eq!(projected[0]["data"], json!({"a": 1, "b": 2}));
 
-    // `query` prints an array; one document of it is what gets edited and written back
     let doc = projected[0].to_string().replace(r#""a":1"#, r#""a":10"#);
     emu.fsq(&["set", "users/u1", "--overwrite", "--data", "-"])
         .write_stdin(doc.clone())
@@ -661,7 +636,6 @@ fn a_select_projection_can_be_merged_but_not_overwritten() {
     );
 
     emu.ok_with_stdin(&["set", "users/u1", "--merge", "--data", "-"], &doc);
-    // only the selected fields changed, and `_select` was not stored as data
     assert_eq!(
         emu.json(&["get", "users/u1"])["data"],
         json!({"a": 10, "b": 2, "c": 3})

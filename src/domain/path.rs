@@ -7,53 +7,41 @@ use thiserror::Error;
 
 use super::ids::{CollectionId, DocId, IdError};
 
-/// Why a string is not a valid collection or document path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Error)]
 pub enum PathError {
-    /// The path had no segments.
     #[error("path must not be empty")]
     Empty,
-    /// A segment was empty (e.g. `a//b`, `users//`, `//users`).
     #[error("path `{input}` has an empty segment at position {position}")]
     EmptySegment {
-        /// The path as given.
         input: String,
         /// Zero-based segment position, after removing one leading and one trailing `/`.
         position: usize,
     },
-    /// A segment is not a valid collection or document id.
     #[error("path `{input}` has an invalid segment at position {position}: {source}")]
     InvalidSegment {
-        /// The path as given.
         input: String,
         /// Zero-based segment position, after removing one leading and one trailing `/`.
         position: usize,
-        /// Why the segment was rejected.
         source: IdError,
     },
-    /// A document path (even number of segments) was required.
     #[error("`{0}` is a collection path; expected a document path like `collection/doc`")]
     ExpectedDoc(String),
-    /// A collection path (odd number of segments) was required.
     #[error("`{0}` is a document path; expected a collection path like `collection`")]
     ExpectedCollection(String),
 }
 
-/// A collection: top-level, or a subcollection of a document.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CollectionPath {
     parent: Option<Box<DocPath>>,
     id: CollectionId,
 }
 
-/// A document inside a collection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DocPath {
     collection: CollectionPath,
     id: DocId,
 }
 
-/// Either kind of path, as typed by a user.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AnyPath {
     /// An odd number of segments: `users`, `users/a/orders`.
@@ -63,7 +51,6 @@ pub enum AnyPath {
 }
 
 impl CollectionPath {
-    /// A collection under `parent` (a top-level collection when `None`).
     #[must_use]
     pub fn new(parent: Option<DocPath>, id: CollectionId) -> Self {
         Self {
@@ -72,13 +59,11 @@ impl CollectionPath {
         }
     }
 
-    /// The collection's own name (last segment).
     #[must_use]
     pub fn id(&self) -> &CollectionId {
         &self.id
     }
 
-    /// The document owning this subcollection, if any.
     #[must_use]
     pub fn parent(&self) -> Option<&DocPath> {
         self.parent.as_deref()
@@ -86,19 +71,16 @@ impl CollectionPath {
 }
 
 impl DocPath {
-    /// The document `id` inside `collection`.
     #[must_use]
     pub fn new(collection: CollectionPath, id: DocId) -> Self {
         Self { collection, id }
     }
 
-    /// The collection containing this document.
     #[must_use]
     pub fn collection(&self) -> &CollectionPath {
         &self.collection
     }
 
-    /// The document's own name (last segment).
     #[must_use]
     pub fn id(&self) -> &DocId {
         &self.id
@@ -129,7 +111,6 @@ impl fmt::Display for AnyPath {
     }
 }
 
-/// Parses the segment at `position` of `input` as an id.
 fn segment<T: FromStr<Err = IdError>>(
     raw: &str,
     position: usize,

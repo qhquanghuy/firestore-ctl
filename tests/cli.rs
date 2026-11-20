@@ -378,8 +378,7 @@ fn invalid_database_env_is_a_usage_error() {
 
 #[test]
 fn allowed_write_passes_authorization() {
-    // Past the policy gate the request is built; the bad --data is then an input
-    // error (exit 2), not a denial (exit 6).
+    // Past the policy gate the bad --data is an input error (exit 2), not a denial (exit 6).
     fsq()
         .env("FSQ_WRITABLE", "p/d")
         .args([
@@ -434,8 +433,8 @@ fn global_flags_have_their_own_help_section() {
         .stdout(contains("Global options:"));
 }
 
-// Nothing listens on port 1. These reach the connection step (so policy, parsing and
-// authorization all passed) and fail there, quickly, without touching any real service.
+// Nothing listens on port 1: these reach the connection step (policy, parsing and
+// authorization all passed) and fail there, without touching any real service.
 #[test]
 fn authorized_write_to_an_unreachable_endpoint_exits_1_not_6() {
     fsq()
@@ -461,7 +460,6 @@ fn read_from_an_unreachable_endpoint_exits_1() {
 
 #[test]
 fn overlapping_update_paths_are_a_usage_error() {
-    // Usage error (2) while building the request: before any connection.
     fsq()
         .env("FSQ_WRITABLE", "p/d")
         .args([
@@ -481,9 +479,8 @@ fn overlapping_update_paths_are_a_usage_error() {
         .stderr(contains("conflicting changes to `a` and `a.b`"));
 }
 
-/// What the bash script sends to complete the last of `words`: `fsq` called with
-/// `FSQ_COMPLETE=bash`, the words after `--`, the index of the word being completed and
-/// the command line up to the cursor (`line`, by default the words joined by spaces).
+/// What the bash script sends: `FSQ_COMPLETE=bash`, the words after `--`, the index of the
+/// word being completed and the line up to the cursor.
 fn completion_line(words: &[&str], line: Option<&str>) -> Command {
     let mut cmd = fsq();
     cmd.env("FSQ_COMPLETE", "bash")
@@ -557,7 +554,6 @@ fn completing_flags_needs_no_project() {
         .stderr("");
 }
 
-/// The completion candidates `cmd` prints, which must come with an empty stderr.
 fn candidates_of(mut cmd: Command) -> Vec<String> {
     let assert = cmd
         .timeout(std::time::Duration::from_secs(10))
@@ -577,14 +573,12 @@ fn candidates(words: &[&str]) -> Vec<String> {
 
 #[test]
 fn collections_are_not_offered_without_a_project() {
-    // Only the flags are left: nothing was looked up, nothing was said.
     let offered = candidates(&["fsq", "query", ""]);
     assert!(offered.iter().all(|c| c.starts_with("--")), "{offered:?}");
 }
 
 #[test]
 fn completion_failures_are_silent() {
-    // A project is known, but the database is unreachable (dead emulator port).
     let offered = candidates(&["fsq", "--project", "p", "query", ""]);
     assert!(offered.iter().all(|c| c.starts_with("--")), "{offered:?}");
     assert_eq!(
@@ -599,7 +593,6 @@ fn completion_failures_are_silent() {
 
 #[test]
 fn completing_operators_needs_no_database() {
-    // Inside the quote bash was given, the candidate is inserted as it is.
     let line = "fsq query users --where 'age >";
     assert_eq!(
         candidates_of(completion_line(
@@ -608,15 +601,12 @@ fn completing_operators_needs_no_database() {
         )),
         ["age >", "age >="]
     );
-    // Outside any quote it has to be quoted to stay one word.
     assert_eq!(
         candidates(&["fsq", "query", "users", "--where", "age >"]),
         ["'age >'", "'age >='"]
     );
 }
 
-/// A cache directory holding the answers `fsq --project p` would have looked up: the
-/// `collections` of the database and, per collection, the `fields` sampled from it.
 fn seeded_cache(collections: &[&str], fields: &[(&str, &[&str])]) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     // `fsq()` points every run at the emulator 127.0.0.1:1, whose answers are cached apart.
@@ -637,9 +627,8 @@ fn seeded_cache(collections: &[&str], fields: &[(&str, &[&str])]) -> tempfile::T
     dir
 }
 
-/// `completion_line` against the database `cache` describes. A lookup the cache does not
-/// answer fails at once, against the dead emulator port of `fsq()`: no test can reach a
-/// real service.
+/// A lookup the cache does not answer fails at once against the dead emulator port: no test
+/// can reach a real service.
 fn completion_cached(cache: &tempfile::TempDir, words: &[&str], line: Option<&str>) -> Command {
     let mut cmd = completion_line(words, line);
     cmd.env("XDG_CACHE_HOME", cache.path());
@@ -666,7 +655,6 @@ fn cached_collections_are_offered_by_prefix() {
             .all(|c| all.contains(&(*c).to_owned())),
         "{all:?}"
     );
-    // `indexes` and `--group` take collection ids too.
     assert_eq!(
         candidates_of(completion_cached(
             &cache,
@@ -711,7 +699,6 @@ fn cached_fields_are_offered_per_flag() {
     assert_eq!(offered("--where", "my", Some(in_single)), ["`my-field`"]);
     let in_double = r#"fsq --project p query users --where "my"#;
     assert_eq!(offered("--where", "my", Some(in_double)), [r"\`my-field\`"]);
-    // Other flags' syntax is not completed.
     assert_eq!(offered("--select", "na ", None), Vec::<String>::new());
     assert_eq!(offered("--order-by", "name,a", None), Vec::<String>::new());
 }
@@ -726,7 +713,6 @@ fn without_the_command_line_only_plain_candidates_are_offered() {
     let mut cmd = completion_cached(&cache, &words, None);
     cmd.env_remove("_FSQ_COMP_LINE");
     assert_eq!(candidates_of(cmd), ["name"]);
-    // With the line they are offered, quoted.
     assert_eq!(
         candidates_of(completion_cached(&cache, &words, None)),
         ["name", "'`my-field`'", "'a b'"]

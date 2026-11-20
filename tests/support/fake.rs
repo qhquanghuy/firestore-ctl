@@ -13,7 +13,6 @@ use fsq::domain::{
 use fsq::policy::WriteAccess;
 use fsq::port::{AggregateResult, Firestore, GatewayError, IndexInfo, Written};
 
-/// The database the fake pretends to be connected to unless told otherwise.
 pub fn default_target() -> DbTarget {
     DbTarget {
         project: "p".parse().expect("valid project"),
@@ -21,7 +20,6 @@ pub fn default_target() -> DbTarget {
     }
 }
 
-/// An in-memory Firestore for one database.
 #[derive(Debug)]
 pub struct FakeFirestore {
     target: DbTarget,
@@ -38,7 +36,6 @@ impl Default for FakeFirestore {
 }
 
 impl FakeFirestore {
-    /// An empty fake connected to `target`.
     pub fn for_target(target: DbTarget) -> Self {
         Self {
             target,
@@ -49,14 +46,12 @@ impl FakeFirestore {
         }
     }
 
-    /// A fake on the default target holding `doc`.
     pub fn with(doc: Document) -> Self {
         let fake = Self::default();
         fake.docs.borrow_mut().insert(doc.path.clone(), doc);
         fake
     }
 
-    /// Makes every query and aggregate fail with a missing-index error.
     pub fn without_index(self) -> Self {
         Self {
             index_missing: true,
@@ -64,12 +59,10 @@ impl FakeFirestore {
         }
     }
 
-    /// The port methods called so far, in order.
     pub fn calls(&self) -> Vec<&'static str> {
         self.calls.borrow().clone()
     }
 
-    /// The stored document at `p`, if any.
     pub fn stored(&self, p: &DocPath) -> Option<Document> {
         self.docs.borrow().get(p).cloned()
     }
@@ -84,8 +77,7 @@ impl FakeFirestore {
         UpdateTime::new(Timestamp::from_unix(seconds, 0).expect("in-range timestamp"))
     }
 
-    /// The documents matching `q`'s scope and `==` filters, up to its limit (no call
-    /// recorded). Anything the fake does not model is an error, never silently ignored.
+    /// Anything the fake does not model is an error, never silently ignored.
     fn matching(&self, q: &Query) -> Result<Vec<Document>, GatewayError> {
         let unsupported =
             |what: &str| Err(GatewayError::Other(format!("fake: unsupported {what}")));
@@ -126,21 +118,13 @@ impl FakeFirestore {
     }
 }
 
-/// What a write requires of the stored document when it carries no `UnchangedSince`
-/// guard (Firestore cannot combine `exists` with `update_time`).
 #[derive(Clone, Copy)]
 enum Unguarded {
-    /// No precondition (upsert).
     Anything,
-    /// `exists = false`: otherwise `AlreadyExists`.
     MustBeAbsent,
-    /// `exists = true`: otherwise `NotFound`.
     MustExist,
 }
 
-/// The write contract documented on [`Firestore::write`]: `UnchangedSince(t)` demands
-/// the document exists with update time `t` (`PreconditionFailed` otherwise); with
-/// [`Guard::None`] the write's own `unguarded` requirement applies.
 fn check_precondition(
     path: &DocPath,
     existing: Option<&Document>,
@@ -174,7 +158,6 @@ fn shallow_merge(existing: Option<Document>, new: &Fields) -> Result<Fields, Gat
         .collect())
 }
 
-/// Applies one field change to a top-level field.
 fn apply_op(mut fields: Fields, op: &FieldOp) -> Result<Fields, GatewayError> {
     let (field, new) = match op {
         FieldOp::Set(field, v) => (field, v.clone()),

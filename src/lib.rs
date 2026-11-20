@@ -1,4 +1,4 @@
-//! fsq
+//! Query Firestore from the command line.
 
 pub mod app;
 pub mod cli;

@@ -8,9 +8,8 @@ use super::{double_json, fields_to_object};
 use crate::domain::document::Document;
 use crate::domain::value::Value;
 
-/// Renders a value without type tags: timestamps, references and bytes (standard
-/// base64) become strings, geo points `{"lat","lng"}`, and non-finite doubles
-/// the strings `"NaN"`, `"Infinity"`, `"-Infinity"`.
+/// Timestamps, references and bytes (standard base64) become strings; non-finite doubles
+/// become `"NaN"`, `"Infinity"`, `"-Infinity"`.
 #[must_use]
 pub fn value_to_json(v: &Value) -> Json {
     match v {
@@ -29,9 +28,8 @@ pub fn value_to_json(v: &Value) -> Json {
     }
 }
 
-/// Renders a document as `{"_path", "_updateTime", "data", "_plain": true}` with
-/// untagged data. The `_plain` marker makes `set --data` refuse the output: untagged
-/// values are lossy (a timestamp would be written back as a string).
+/// The `_plain` marker makes `set --data` refuse the output: untagged values are lossy (a
+/// timestamp would be written back as a string).
 #[must_use]
 pub fn document_to_json(d: &Document) -> Json {
     json!({

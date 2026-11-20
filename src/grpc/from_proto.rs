@@ -21,7 +21,6 @@ fn other(message: impl Into<String>) -> GatewayError {
     GatewayError::Other(message.into())
 }
 
-/// The document path of resource `name`, which must lie under `t`'s documents root.
 /// The root is matched with its trailing `/`, so `d2` is not mistaken for `d`.
 fn doc_path(name: &str, t: &DbTarget) -> Result<DocPath, GatewayError> {
     name.strip_prefix(&format!("{}/", t.documents_root()))
@@ -35,8 +34,6 @@ fn doc_path(name: &str, t: &DbTarget) -> Result<DocPath, GatewayError> {
         .map_err(|e| other(format!("`{name}` is not a document: {e}")))
 }
 
-/// A document read from `t`.
-///
 /// # Errors
 /// [`GatewayError::Other`] if the document is not in `t`, has no update time, or holds a
 /// value this program cannot represent.
@@ -109,7 +106,6 @@ pub fn value(v: proto::Value, t: &DbTarget) -> Result<Value, GatewayError> {
     }
 }
 
-/// The reference `name`: relative when it lies in `t`, otherwise kept as a full name.
 fn reference(name: &str, t: &DbTarget) -> Result<Value, GatewayError> {
     if name.starts_with(&format!("{}/", t.documents_root())) {
         doc_path(name, t).map(Value::Ref)
@@ -120,16 +116,12 @@ fn reference(name: &str, t: &DbTarget) -> Result<Value, GatewayError> {
     }
 }
 
-/// A proto timestamp as an update time.
-///
 /// # Errors
 /// [`GatewayError::Other`] if the timestamp is out of range.
 pub fn update_time(t: &prost_types::Timestamp) -> Result<UpdateTime, GatewayError> {
     timestamp(t).map(UpdateTime::new)
 }
 
-/// An existing composite index of collection group `c`.
-///
 /// Indexes the domain cannot express are skipped (`None`), never approximated: vector or
 /// search fields, recursive scope, an unknown field mode, a field path that does not
 /// parse. Only the implicit trailing `__name__` field is dropped.

@@ -1,14 +1,12 @@
-//! bash support for dynamic completion: `clap_complete`'s own bash adapter, except that
-//! the candidates it prints are made safe to insert into a command line.
+//! bash support for dynamic completion: `clap_complete`'s bash adapter, except that the
+//! candidates it prints are made safe to insert into a command line.
 //!
-//! bash inserts a candidate exactly as printed (the registration script does not use
-//! `-o filenames`), so a field name such as `` `my-field` `` (a command substitution!), or
-//! one with spaces, `$`, `;` or `!`, would change the meaning of the line, and a name
-//! coming from a document is attacker-controlled data. Escaping needs to know whether the
-//! cursor is inside an open quote, which bash does not tell a completion function; the
-//! registration script is therefore patched to pass the line up to the cursor in
-//! [`LINE_VAR`]. Without it (the patch did not apply, or something else registered the
-//! completion) nothing but plain words is offered: the escaping fails closed.
+//! bash inserts a candidate exactly as printed, so a field name such as `` `my-field` `` (a
+//! command substitution) or one with spaces, `$`, `;` or `!` would change the line's meaning,
+//! and a name from a document is attacker-controlled. Escaping needs to know whether the
+//! cursor is inside an open quote, which bash does not tell a completion function, so the
+//! registration script is patched to pass the line up to the cursor in [`LINE_VAR`]. Without
+//! it only plain words are offered: the escaping fails closed.
 
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -18,35 +16,25 @@ use clap_complete::engine::complete;
 use clap_complete::env::{Bash, EnvCompleter};
 use itertools::Itertools;
 
-/// The environment variable the patched registration script sets to the part of the
-/// command line before the cursor.
 const LINE_VAR: &str = "_FSQ_COMP_LINE";
 
 /// The line of `clap_complete`'s bash script after which [`LINE_VAR`] is passed. A unit
 /// test fails if a `clap_complete` upgrade changes it.
 const ANCHOR: &str = "_CLAP_COMPLETE_INDEX=\"$_CLAP_COMPLETE_INDEX\" \\\n";
 
-/// Characters that never need quoting in a bash word.
 fn is_plain(c: char) -> bool {
     c.is_ascii_alphanumeric() || "_./:,=-".contains(c)
 }
 
-/// Where the cursor is, as far as quoting goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Cursor {
-    /// Outside any quote.
     Bare,
-    /// Inside `'...`.
     Single,
-    /// Inside `"...`.
     Double,
-    /// Not known: the command line was not passed.
     Unknown,
 }
 
 impl Cursor {
-    /// The cursor at the end of `line` (the command line up to the cursor), as bash would
-    /// read it; [`Cursor::Unknown`] without a line.
     fn after(line: Option<&str>) -> Self {
         line.map_or(Self::Unknown, |line| {
             line.chars()
@@ -68,13 +56,11 @@ impl Cursor {
     }
 }
 
-/// `candidate` as the text to insert at the cursor, or `None` if it cannot be inserted
-/// safely: it has a control character, or it is not a plain word and the cursor's quoting
-/// is unknown. Outside quotes it is single-quoted unless it only has plain characters;
-/// inside an open quote only that quote's metacharacters are escaped. `!` (history
-/// expansion, which applies outside quotes and inside double quotes but not inside single
-/// quotes) is always escaped, to be safe: the open quote is closed around a backslash-escaped
-/// `!` and reopened.
+/// `None` if the candidate has a control character, or is not a plain word and the cursor's
+/// quoting is unknown. Outside quotes it is single-quoted unless plain; inside an open quote
+/// only that quote's metacharacters are escaped. `!` (history expansion: active outside
+/// quotes and inside double quotes) is always escaped by closing the open quote around a
+/// backslash-escaped `!` and reopening it.
 fn bash_word(candidate: &str, cursor: Cursor) -> Option<String> {
     if candidate.chars().any(char::is_control) {
         return None;
@@ -98,7 +84,6 @@ fn bash_word(candidate: &str, cursor: Cursor) -> Option<String> {
     }
 }
 
-/// The candidates that can be offered at the end of `line`, ready to insert.
 fn bash_words<'a>(
     candidates: impl IntoIterator<Item = &'a str>,
     line: Option<&str>,
@@ -120,7 +105,6 @@ fn with_line_passed(script: &str) -> String {
     )
 }
 
-/// `clap_complete`'s bash adapter with escaped candidates.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct FsqBash;
 
@@ -269,7 +253,6 @@ mod tests {
             "a!b",
         ];
         assert_eq!(bash_words(candidates, None), ["users", "name", "--where"]);
-        // With the line, the same candidates are all offered, quoted for the context.
         assert_eq!(
             bash_words(candidates, Some("fsq query users --select ")),
             [
@@ -284,7 +267,6 @@ mod tests {
         );
     }
 
-    /// What a real bash makes of `prefix`, the escaped candidate and `suffix`.
     fn evaluated(prefix: &str, word: &str, suffix: &str) -> String {
         let out = std::process::Command::new("bash")
             .args(["-c", &format!("printf %s {prefix}{word}{suffix}")])
@@ -293,8 +275,8 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
-    /// The escaped word, evaluated by a real bash in the context it was escaped for, is
-    /// the candidate again (the surrounding quotes being what the user had typed).
+    /// The escaped word, evaluated by a real bash in the context it was escaped for, is the
+    /// candidate again.
     #[test]
     fn escaped_words_round_trip_through_bash() {
         let Ok(bash) = std::process::Command::new("bash").arg("--version").output() else {

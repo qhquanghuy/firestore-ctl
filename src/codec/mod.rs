@@ -13,13 +13,11 @@ use crate::domain::value::{Fields, Value};
 pub mod plain_json;
 pub mod typed_json;
 
-/// Why a JSON input could not be decoded into Firestore values.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{}: {reason}", if at.is_empty() { "(root)" } else { at.as_str() })]
 pub struct CodecError {
     /// RFC 6901 JSON pointer to the offending JSON node (`""` is the root).
     pub at: String,
-    /// What is wrong with it.
     pub reason: String,
 }
 
@@ -32,7 +30,6 @@ impl CodecError {
     }
 }
 
-/// Encodes each field with `encode` into a JSON object.
 fn fields_to_object(
     fields: &Fields,
     encode: fn(&Value) -> serde_json::Value,
@@ -40,9 +37,8 @@ fn fields_to_object(
     fields.iter().map(|(k, v)| (k.clone(), encode(v))).collect()
 }
 
-/// Marks a printed document as a `--select` projection with the top-level
-/// `"_select": [<field paths as printed>]`; `set --overwrite` refuses such input because
-/// it holds only some of the document's fields.
+/// Marks a printed document as a `--select` projection (`"_select": [<field paths>]`);
+/// `set --overwrite` refuses such input because it holds only some of the fields.
 #[must_use]
 pub fn mark_selected(document: serde_json::Value, select: &[FieldPath]) -> serde_json::Value {
     match document {
@@ -59,8 +55,8 @@ pub fn mark_selected(document: serde_json::Value, select: &[FieldPath]) -> serde
     }
 }
 
-/// A finite double as a JSON number; NaN and infinities as the strings
-/// `"NaN"`, `"Infinity"`, `"-Infinity"` (JSON has no such numbers).
+/// A finite double as a JSON number; NaN and infinities as the strings `"NaN"`, `"Infinity"`,
+/// `"-Infinity"` (JSON has no such numbers).
 fn double_json(f: f64) -> serde_json::Value {
     Number::from_f64(f).map_or_else(
         || {
@@ -106,12 +102,10 @@ mod tests {
         }
     }
 
-    /// The fields `set --data` would write for `j`.
     fn fields_from_input(j: &serde_json::Value) -> Result<Fields, super::CodecError> {
         typed_json::parse_input(j).map(|input| input.fields)
     }
 
-    /// Text boundary: what `get` prints and `set --data` parses.
     fn through_text(v: &Value) -> Result<Value, super::CodecError> {
         let text = typed_json::value_to_json(v).to_string();
         typed_json::value_from_json(&serde_json::from_str(&text).unwrap())
@@ -177,8 +171,6 @@ mod tests {
         assert_eq!(j["data"]["t"], "2026-01-05T10:00:00Z");
     }
 
-    // ---- hardening beyond the brief ----
-
     #[test]
     fn int_extremes_roundtrip_through_text() {
         for i in [i64::MIN, i64::MAX, 0, -1] {
@@ -238,7 +230,6 @@ mod tests {
     fn nested_arrays_are_rejected_with_a_pointer() {
         let e = typed_json::value_from_json(&json!({"a": [1, [2]]})).unwrap_err();
         assert_eq!(e.at, "/a/1");
-        // an array of maps containing arrays is fine
         assert!(typed_json::value_from_json(&json!([{"x": [1]}])).is_ok());
     }
 
@@ -259,7 +250,6 @@ mod tests {
             fields_from_input(&json!({"data": 5})).unwrap()["data"],
             Value::Int(5)
         );
-        // stray keys are errors, never dropped
         for j in [
             json!({"_path": "teams/t1", "data": {}, "extra": 1}),
             json!({"_path": "teams/t1", "extra": 1}),
@@ -273,14 +263,12 @@ mod tests {
                 e.reason
             );
         }
-        // a full document without data is an error
         assert_eq!(
             fields_from_input(&json!({"_path": "teams/t1"}))
                 .unwrap_err()
                 .at,
             "/data"
         );
-        // otherwise it is bare data, keys kept literally
         let bare = fields_from_input(&json!({"data": 5, "other": 6})).unwrap();
         assert_eq!(bare.len(), 2);
     }
@@ -356,9 +344,7 @@ mod tests {
         assert!(envelope.plain);
         assert_eq!(envelope.select.map(|s| s.len()), Some(1));
         assert_eq!(envelope.path, None);
-        // never stored as data: only the sibling `data` field is left
         assert_eq!(stripped.fields.keys().collect::<Vec<_>>(), ["data"]);
-        // unmarked bare data has no envelope at all
         assert_eq!(
             typed_json::parse_input(&json!({"a": 1})).unwrap().envelope,
             None
@@ -375,7 +361,6 @@ mod tests {
             &["name".parse().unwrap(), "a.`b c`".parse().unwrap()],
         );
         assert_eq!(marked["_select"], json!(["name", "a.`b c`"]));
-        // a marked printout reads back as a projection of the same fields
         let read = typed_json::parse_input(&marked).unwrap();
         assert_eq!(read.fields, doc.data);
         assert_eq!(read.envelope.unwrap().select.map(|s| s.len()), Some(2));

@@ -13,53 +13,37 @@ use crate::codec::{mark_selected, plain_json, typed_json};
 use crate::domain::{Aggregation, DbTarget, Document, FieldPath, IndexAdvice};
 use crate::port::{AggregateResult, GatewayError, IndexInfo, Written};
 
-/// Shown in a table cell where a document has no such field.
 const MISSING_CELL: &str = "—";
 
-/// How results are laid out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
-    /// A human-readable table.
     Table,
-    /// One JSON value.
     Json,
-    /// One compact JSON document per line.
     Jsonl,
 }
 
-/// Whether JSON is indented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
-    /// Indented, multi-line.
     Pretty,
-    /// A single line.
     Compact,
 }
 
-/// Whether JSON values carry type tags (`$ts`, `$double`, ...).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Typing {
-    /// Lossless typed JSON.
     Typed,
-    /// Untagged JSON for humans and `jq`.
     Plain,
 }
 
-/// Fully resolved output options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderOpts {
-    /// Table, JSON or JSON lines.
     pub format: Format,
-    /// JSON indentation.
     pub layout: Layout,
-    /// JSON type tags.
     pub typing: Typing,
 }
 
 impl RenderOpts {
-    /// Applies the defaults for a terminal (`is_tty`) or a pipe to what the flags left
-    /// unset: a table on a terminal and JSON otherwise; JSON indented on a terminal and
-    /// compact otherwise. `jsonl` is always compact, whatever `layout` says.
+    /// A table on a terminal and JSON otherwise; JSON indented on a terminal and compact
+    /// otherwise. `jsonl` is always compact.
     #[must_use]
     pub fn resolve(
         is_tty: bool,
@@ -82,8 +66,7 @@ impl RenderOpts {
     }
 }
 
-/// Text for stdout. Every line, the last included, ends with `\n`; an empty result
-/// of `jsonl` is the empty string. Print it as is.
+/// Every line, the last included, ends with `\n`; an empty `jsonl` result is the empty string.
 #[must_use]
 pub fn render(o: &Output, opts: &RenderOpts) -> String {
     match opts.format {
@@ -107,15 +90,14 @@ pub fn render(o: &Output, opts: &RenderOpts) -> String {
     }
 }
 
-/// Text for stderr; ends with `\n` like [`render`]. The error's message once, plus
-/// what to do about it: for a missing index the `gcloud` command (composite indexes) or
-/// a description of the index (single-field ones, which have no safe command) and the
-/// console link, each labelled on its own line; for an authentication failure the login
-/// command; for a permission failure a pointer to IAM. Every variant is listed, so a
-/// new one forces a decision here.
+/// Text for stderr; ends with `\n` like [`render`]. The message once, plus what to do about
+/// it: for a missing index the `gcloud` command (composite) or a description (single-field,
+/// no safe command) and the console link; for an authentication failure the login command;
+/// for a permission failure a pointer to IAM. Every variant is listed, so a new one forces a
+/// decision here.
 ///
-/// Messages can carry server or stored text, so control characters (ESC, C1, DEL, ...)
-/// are shown as escape sequences, as in tables.
+/// Messages can carry server or stored text, so control characters are shown as escape
+/// sequences, as in tables.
 #[must_use]
 pub fn render_error(e: &AppError, t: &DbTarget) -> String {
     let message = e.to_string();
@@ -156,9 +138,8 @@ pub fn render_error(e: &AppError, t: &DbTarget) -> String {
         .collect()
 }
 
-/// The message, then what creates the index: the `gcloud` command of a composite index, or
-/// for a single-field one a description (a `gcloud ... fields update --index` would
-/// replace the field's other indexes) pointing at the console link.
+/// A single-field index gets a description, not a command: `gcloud ... fields update
+/// --index` would replace the field's other indexes.
 fn index_help(
     message: String,
     advice: Option<&IndexAdvice>,
@@ -197,14 +178,12 @@ fn index_help(
         .collect()
 }
 
-/// The JSON form of an output: one value, or a list of them.
 enum Shape {
     One(Json),
     Many(Vec<Json>),
 }
 
 impl Shape {
-    /// The JSON values, one per `jsonl` line.
     fn records(self) -> Vec<Json> {
         match self {
             Self::One(j) => vec![j],
@@ -232,7 +211,6 @@ fn shape(o: &Output, typing: Typing) -> Shape {
     }
 }
 
-/// A document's JSON, marked as a projection when `select` (the query's `--select`) is set.
 fn document_json(d: &Document, typing: Typing, select: Option<&[FieldPath]>) -> Json {
     let json = match typing {
         Typing::Typed => typed_json::document_to_json(d),
@@ -248,9 +226,9 @@ fn object(entries: Vec<(String, Json)>) -> Json {
     Json::Object(entries.into_iter().collect::<Map<_, _>>())
 }
 
-/// `count`, `sum_<field>` and `avg_<field>` keys with their values, in request order
-/// (a table keeps that order; JSON objects print keys sorted). The field is its raw
-/// segments joined by `.`, without Firestore's backtick quoting.
+/// `count`, `sum_<field>` and `avg_<field>` keys in request order (a table keeps that order;
+/// JSON objects print keys sorted). The field is its raw segments joined by `.`, without
+/// Firestore's backtick quoting.
 fn aggregate_entries(r: &AggregateResult, typing: Typing) -> Vec<(String, Json)> {
     r.entries()
         .map(|(aggregation, value)| {
@@ -288,7 +266,6 @@ fn index_json(i: &IndexInfo) -> Json {
     })
 }
 
-/// A table's header and rows, as the text of each cell.
 struct Grid {
     header: Vec<String>,
     rows: Vec<Vec<String>>,
@@ -356,7 +333,6 @@ fn documents_grid(ds: &[Document]) -> Grid {
     }
 }
 
-/// One row: keys as columns, values as cells.
 fn entries_grid(entries: &[(String, Json)]) -> Grid {
     Grid {
         header: entries.iter().map(|(k, _)| k.clone()).collect(),
@@ -364,7 +340,6 @@ fn entries_grid(entries: &[(String, Json)]) -> Grid {
     }
 }
 
-/// Strings raw, everything else as compact JSON.
 fn cell(j: &Json) -> String {
     match j {
         Json::String(s) => s.clone(),
@@ -372,8 +347,7 @@ fn cell(j: &Json) -> String {
     }
 }
 
-/// `s` with control characters (newlines, tabs, ANSI escapes, ...) shown as escape
-/// sequences, so stored data cannot move the cursor or restyle the terminal.
+/// Stored data must not be able to move the cursor or restyle the terminal.
 fn escape_controls(s: &str) -> String {
     s.chars()
         .flat_map(|c| match c {
@@ -565,7 +539,6 @@ mod tests {
         assert_eq!(plain["data"]["x"], json!(1.5));
     }
 
-    /// The trimmed cells of one table line.
     fn cells(line: &str) -> Vec<String> {
         line.trim_matches('│')
             .split('┆')
@@ -882,7 +855,6 @@ mod tests {
         }
         let line = render(&o, &jsonl());
         assert_eq!(parse(&line)["_select"], json!(["name", "`a b`.c"]));
-        // no projection, no marker
         assert!(
             parse(&render(&two_docs(), &compact_json()))[0]
                 .get("_select")

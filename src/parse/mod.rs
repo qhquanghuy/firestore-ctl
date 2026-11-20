@@ -12,13 +12,10 @@ pub mod token;
 
 pub use token::parse_token;
 
-/// A flag value that could not be parsed.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{input}: {reason}")]
 pub struct ParseError {
-    /// The text that was rejected.
     pub input: String,
-    /// What is wrong with it.
     pub reason: String,
 }
 
@@ -66,9 +63,8 @@ pub(crate) fn unquoted(s: &str, quote: char) -> impl Iterator<Item = (usize, cha
 /// make operators, directions or typos parse as part of the name.
 const RESERVED_IN_FIELD: &str = "<>!=+-:";
 
-/// Parses a field path from a flag (surrounding whitespace ignored). Outside backticks, whitespace and
-/// `< > ! = + - :` are rejected (backtick-quote such names); `hint` is appended
-/// to that error to point at the likely intended syntax.
+/// Parses a field path from a flag. `hint` is appended to the rejection error to point at
+/// the likely intended syntax.
 pub(crate) fn parse_field(text: &str, hint: &str) -> Result<FieldPath, String> {
     let text = text.trim();
     match unquoted(text, '`').find(|&(_, c)| c.is_whitespace() || RESERVED_IN_FIELD.contains(c)) {

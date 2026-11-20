@@ -7,19 +7,14 @@ use super::ids::{CollectionId, DbTarget};
 use super::nonempty::NonEmptyVec;
 use super::query::{Direction, Filter, Op, Query, Scope};
 
-/// How one field participates in a composite index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexMode {
-    /// Ascending order.
     Asc,
-    /// Descending order.
     Desc,
-    /// Array-contains matching.
     ArrayContains,
 }
 
 impl IndexMode {
-    /// The mode as written in output: `asc`, `desc` or `array-contains`.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -30,26 +25,19 @@ impl IndexMode {
     }
 }
 
-/// One field of an index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexField {
-    /// The indexed field.
     pub field: FieldPath,
-    /// How it is indexed.
     pub mode: IndexMode,
 }
 
-/// Whether an index serves one collection or every collection of the same name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryScope {
-    /// A single collection.
     Collection,
-    /// All collections with the group's name.
     CollectionGroup,
 }
 
 impl QueryScope {
-    /// The scope as written in output: `collection` or `collection-group`.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -63,44 +51,34 @@ impl QueryScope {
 /// two fields, the minimum Firestore accepts for a composite index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexSpec {
-    /// The collection (or group) name the index is on.
     pub collection_group: CollectionId,
-    /// Single collection or collection group.
     pub scope: QueryScope,
-    /// Indexed fields, in index order.
     pub fields: NonEmptyVec<IndexField>,
 }
 
-/// The index a query is missing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexAdvice {
-    /// A composite index over two or more fields.
     Composite(IndexSpec),
     /// A collection-group-scoped single-field index (not created by default, and
     /// Firestore rejects one-field composite indexes).
     SingleField {
-        /// The collection group name.
         collection_group: CollectionId,
-        /// The field and how it must be indexed.
         field: IndexField,
     },
 }
 
-/// What index `q` needs beyond Firestore's automatic indexes, if any.
+/// What index `q` needs beyond Firestore's automatic ones, if any.
 ///
-/// Candidate fields, in order, each at its first position only:
-/// 1. equality filters (`==`, `in`: ascending; `array-contains[-any]`: array-contains)
-///    in filter order;
-/// 2. each `order` term with its direction;
-/// 3. fields of inequality filters (`!=`, `not-in`, `<`, `<=`, `>`, `>=`) not yet
-///    present, sorted by field path, in the direction of the last `order` term
-///    (ascending if there is none), as Firestore orders them implicitly.
+/// Candidate fields, each at its first position only: equality filters (`==`, `in`:
+/// ascending; `array-contains[-any]`: array-contains) in filter order; then each `order`
+/// term; then fields of inequality filters not yet present, sorted by path, in the direction
+/// of the last `order` term (ascending if none), as Firestore orders them implicitly.
+/// `__name__` is never a candidate.
 ///
-/// The document name (`__name__`) is never a candidate. For a collection scope the
-/// result is [`IndexAdvice::Composite`] when there are at least two candidates and at
-/// least one ordering or inequality; equality-only queries are served by merging
-/// single-field indexes. A collection-group scope has no automatic indexes: two or more
-/// candidates give a composite, exactly one gives [`IndexAdvice::SingleField`].
+/// Collection scope: a composite needs at least two candidates and one ordering or
+/// inequality (equality-only queries are served by merging single-field indexes).
+/// Collection-group scope has no automatic indexes: two or more candidates give a composite,
+/// exactly one gives [`IndexAdvice::SingleField`].
 #[must_use]
 pub fn required_index(q: &Query) -> Option<IndexAdvice> {
     let is_equality = |f: &&Filter| {
@@ -182,7 +160,6 @@ fn direction_mode(direction: Direction) -> IndexMode {
 }
 
 impl IndexMode {
-    /// The mode as `gcloud firestore indexes composite create --field-config` spells it.
     fn gcloud_config(self) -> &'static str {
         match self {
             Self::Asc => "order=ascending",
@@ -193,11 +170,9 @@ impl IndexMode {
 }
 
 impl IndexAdvice {
-    /// A shell command creating the advised index in `t`'s database, when one is safe to
-    /// suggest: a composite index. A single-field index has none, because
-    /// `gcloud firestore indexes fields update --index=...` replaces *all* of the
-    /// field's indexes, deleting the ones it does not list; the user is pointed at the
-    /// console link instead.
+    /// A single-field index has no command: `gcloud firestore indexes fields update --index=...`
+    /// replaces *all* of the field's indexes, deleting the ones it does not list, so the user is
+    /// pointed at the console link instead.
     #[must_use]
     pub fn gcloud_command(&self, t: &DbTarget) -> Option<String> {
         match self {
@@ -208,7 +183,6 @@ impl IndexAdvice {
 }
 
 impl IndexSpec {
-    /// A shell command creating this composite index in `t`'s database.
     #[must_use]
     pub fn gcloud_command(&self, t: &DbTarget) -> String {
         let scope = match self.scope {
@@ -236,7 +210,6 @@ impl IndexSpec {
     }
 }
 
-/// Joins a fixed command prefix (the first word) and quoted arguments with spaces.
 fn shell_join(words: &[String]) -> String {
     words
         .iter()
@@ -245,7 +218,6 @@ fn shell_join(words: &[String]) -> String {
         .join(" ")
 }
 
-/// `arg` single-quoted for a POSIX shell unless it is already plain.
 fn shell_quote(arg: &str) -> String {
     let plain = |c: char| c.is_ascii_alphanumeric() || "-_=,.:/@+".contains(c);
     if arg.chars().all(plain) {
@@ -295,7 +267,6 @@ mod tests {
         }
     }
 
-    /// The composite index `q` needs; fails the test for any other advice.
     fn composite(q: &Query) -> IndexSpec {
         match required_index(q) {
             Some(IndexAdvice::Composite(spec)) => spec,

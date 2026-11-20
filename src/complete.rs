@@ -1,16 +1,15 @@
-//! Dynamic shell completion (`FSQ_COMPLETE=<shell> fsq`): collection ids and field names
-//! are looked up in the database being addressed while the user presses TAB.
+//! Dynamic shell completion (`FSQ_COMPLETE=<shell> fsq`): collection ids and field names are
+//! looked up in the addressed database while the user presses TAB.
 //!
 //! Completion must never get in the way, so every completer here is best effort:
 //! - it returns no candidates on any failure (no project, no credentials, timeout, ...);
 //! - it prints nothing itself (stdout is the completion protocol);
-//! - it only reads Firestore, and its only side effect is writing the cache files below;
+//! - it only reads Firestore; its only side effect is writing the cache files;
 //! - it gives up after [`DEADLINE`], connecting included, and after a failure does not try
 //!   again for [`FAILURE_TTL`], so an offline user is slowed down once a minute at most.
 //!
-//! The database and collection come from the words already typed (`--project`,
-//! `--database`, the collection argument), then from `FSQ_PROJECT` / `FSQ_DATABASE`.
-//! Answers are cached for [`CACHE_TTL`] under
+//! The database and collection come from the words already typed, then from `FSQ_PROJECT` /
+//! `FSQ_DATABASE`. Answers are cached for [`CACHE_TTL`] under
 //! `$XDG_CACHE_HOME/fsq/<project>/<database>/` (`~/.cache` when unset).
 //!
 //! # Reliance on `clap_complete` internals
@@ -52,32 +51,24 @@ use crate::port::Firestore;
 /// stray `COMPLETE` in someone's environment must not hijack the program.
 pub const COMPLETE_VAR: &str = "FSQ_COMPLETE";
 
-/// Everything a lookup does, connecting included, must finish within this.
 const DEADLINE: Duration = Duration::from_secs(2);
-/// How long a cached answer is trusted.
 const CACHE_TTL: Duration = Duration::from_mins(10);
-/// How long a failed lookup is remembered (and not repeated).
 const FAILURE_TTL: Duration = Duration::from_mins(1);
-/// Documents sampled to discover field names.
 const SAMPLE_SIZE: NonZeroU32 = NonZeroU32::new(20).unwrap();
-/// Deepest nesting offered: `a.b.c` has depth 3.
 const MAX_FIELD_DEPTH: usize = 3;
 
-/// The shells that can be completed: bash (made safe for field names that are not plain
-/// words, see [`bash`]) and zsh. These are the ones `fsq completions` documents
-/// (`CompletionShell`); the others `clap_complete` knows are deliberately not registered.
+/// bash (made safe for field names that are not plain words, see [`bash`]) and zsh: the
+/// shells `fsq completions` documents; the others `clap_complete` knows are not registered.
 #[must_use]
 pub fn shells() -> Shells<'static> {
     Shells(&[&bash::FsqBash, &Zsh])
 }
 
-/// The line that enables completion in `shell`; what `fsq completions <shell>` prints.
 #[must_use]
 pub fn registration_line(shell: CompletionShell) -> String {
     format!("source <({COMPLETE_VAR}={} fsq)", shell.name())
 }
 
-/// Completer for collection ids (the collection argument, `--group`).
 #[must_use]
 pub fn collection_completer() -> ArgValueCompleter {
     ArgValueCompleter::new(|current: &OsStr| {
@@ -93,21 +84,15 @@ pub fn collection_completer() -> ArgValueCompleter {
     })
 }
 
-/// The flag a field completer serves. It decides what may follow the field name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldKind {
-    /// `--where`: an operator follows (`age >=`).
     Where,
-    /// `--order-by`: a direction follows (`age:desc`).
     OrderBy,
-    /// `--select`: a comma separated list of fields.
     Select,
     /// `--sum`, `--avg`, `--set`: the field name alone (`--set`'s `=value` is not completed).
     Single,
 }
 
-/// Completer for the field part of the flag value `kind`: field names sampled from the
-/// collection already typed on the command line.
 #[must_use]
 pub fn field_completer(kind: FieldKind) -> ArgValueCompleter {
     ArgValueCompleter::new(move |current: &OsStr| {
@@ -124,11 +109,10 @@ pub fn field_completer(kind: FieldKind) -> ArgValueCompleter {
     })
 }
 
-/// The candidates `complete` finds, or none if it finds nothing or panics. A panic
-/// (say, inside a dependency) must not print its message in a release build: stderr is
-/// the user's terminal in the middle of typing. Debug builds (and so the test suite) keep
-/// the message. The process exits right after completing, so the silenced hook is not
-/// restored.
+/// The candidates `complete` finds, or none if it finds nothing or panics. A panic must not
+/// print its message in a release build: stderr is the user's terminal mid-typing. Debug
+/// builds (and so the test suite) keep it. The process exits right after completing, so the
+/// silenced hook is not restored.
 fn silently(
     complete: impl FnOnce() -> Option<Vec<CompletionCandidate>>,
 ) -> Vec<CompletionCandidate> {
@@ -140,8 +124,8 @@ fn silently(
         .unwrap_or_default()
 }
 
-/// The names of the fields in `docs`: every key, and the keys of nested maps (as
-/// dotted paths) down to depth [`MAX_FIELD_DEPTH`]. Arrays are not descended into.
+/// Every key, and the keys of nested maps (as dotted paths) down to depth
+/// [`MAX_FIELD_DEPTH`]. Arrays are not descended into.
 #[must_use]
 pub fn field_names(docs: &[Document]) -> BTreeSet<FieldPath> {
     docs.iter()
@@ -150,7 +134,6 @@ pub fn field_names(docs: &[Document]) -> BTreeSet<FieldPath> {
         .collect()
 }
 
-/// The path of every key of `fields` (below `prefix`) and of every nested map's keys.
 fn nested_keys(prefix: &[String], fields: &Fields) -> Vec<Vec<String>> {
     fields
         .iter()
@@ -165,16 +148,10 @@ fn nested_keys(prefix: &[String], fields: &Fields) -> Vec<Vec<String>> {
         .collect()
 }
 
-// ---- what the command line typed so far tells us ----
-
-/// What is known about the command being completed.
 #[derive(Debug)]
 struct Invocation {
-    /// The database to ask; `None` when no project is given anywhere.
     target: Option<DbTarget>,
-    /// The collection(s) the command reads or writes, once typed.
     scope: Option<Scope>,
-    /// Where the cache lives; `None` when there is no usable home.
     cache_base: Option<PathBuf>,
     /// The Firestore emulator in use (`FIRESTORE_EMULATOR_HOST`): its data is not the
     /// database's, so it is cached apart.
@@ -184,7 +161,6 @@ struct Invocation {
 }
 
 impl Invocation {
-    /// From the process's own arguments and environment, as set up by the shell script.
     fn from_process() -> Self {
         let index = std::env::var("_CLAP_COMPLETE_INDEX")
             .ok()
@@ -199,8 +175,6 @@ impl Invocation {
         }
     }
 
-    /// From the typed `words` (program name first; see [`Typed::words`]) and an
-    /// environment lookup.
     fn new(words: &[String], env: &impl Fn(&str) -> Option<String>) -> Self {
         let matches = lenient_command().try_get_matches_from(words).ok();
         let conn = ConnArgs {
@@ -222,12 +196,10 @@ impl Invocation {
     }
 }
 
-/// The words of the line being completed, as the command parser should see them.
 #[derive(Debug, PartialEq, Eq)]
 struct Typed {
-    /// The words after the program name's `--` marker, with the word at the cursor
-    /// replaced by an empty one (so that a flag before it still gets its value and the
-    /// words after the cursor are still read).
+    /// The words after the program name's `--` marker, with the word at the cursor replaced by
+    /// an empty one (so a flag before it still gets its value and later words are still read).
     words: Vec<String>,
     /// Whether the shell cut the cursor word off the word before it at a `:` or `=`
     /// (bash breaks words at those characters: `--order-by age:d` arrives as `age`, `:`,
@@ -236,8 +208,6 @@ struct Typed {
     detached: bool,
 }
 
-/// The words the shell passed after `--` (the whole line, words after the cursor
-/// included); `index` is the position of the word being completed.
 fn typed_words(args: impl Iterator<Item = String>, index: Option<usize>) -> Typed {
     let raw = args.skip_while(|a| a != "--").skip(1).collect_vec();
     let detached = index
@@ -301,7 +271,6 @@ fn lenient_command() -> clap::Command {
     as_text(Cli::command()).ignore_errors(true)
 }
 
-/// The value of `id` (a flag of the command or of its subcommand) if it parses as a `T`.
 fn parsed<T: FromStr>(matches: &ArgMatches, id: &str) -> Option<T> {
     let text = |m: &ArgMatches| m.try_get_one::<String>(id).ok().flatten().cloned();
     text(matches)
@@ -309,8 +278,6 @@ fn parsed<T: FromStr>(matches: &ArgMatches, id: &str) -> Option<T> {
         .and_then(|text| text.parse().ok())
 }
 
-/// The collection(s) a typed command line addresses: the collection or `--group` of
-/// `query` / `count`, the collection holding the document of `get` / `set` / ...
 fn scope_of(matches: &ArgMatches) -> Option<Scope> {
     let (_, sub) = matches.subcommand()?;
     let group = parsed::<CollectionId>(sub, "group");
@@ -325,8 +292,6 @@ fn scope_of(matches: &ArgMatches) -> Option<Scope> {
         (Some(_), Some(AnyPath::Collection(_))) | (None, None) => None,
     }
 }
-
-// ---- candidates ----
 
 fn collection_candidates(
     inv: &Invocation,
@@ -382,15 +347,13 @@ fn field_candidates(
         .collect()
 }
 
-/// Whether `typed` starts the field `field` (as Firestore renders it, so quoted if need
-/// be): either as written or without the quoting, so that `my` finds `` `my-field` ``.
+/// Matches as written or without the quoting, so that `my` finds `` `my-field` ``.
 fn names_field(field: &str, typed: &str) -> bool {
     field.starts_with(typed)
         || FieldPath::from_str(field)
             .is_ok_and(|path| path.segments().iter().join(".").starts_with(typed))
 }
 
-/// The sort directions starting with `typed`.
 fn directions(typed: &str) -> impl Iterator<Item = String> + '_ {
     ["asc", "desc"]
         .into_iter()
@@ -398,29 +361,25 @@ fn directions(typed: &str) -> impl Iterator<Item = String> + '_ {
         .map(str::to_owned)
 }
 
-/// What the word being completed asks for.
 #[derive(Debug, PartialEq, Eq)]
 enum FieldPosition<'a> {
-    /// A field name starting with `typed`, to be preceded by `kept` (the earlier items of
-    /// a `--select a,b,` list).
-    Field { kept: &'a str, typed: &'a str },
-    /// Complete candidates that need no lookup: operators or sort directions.
+    /// A field name starting with `typed`, after `kept` (the earlier items of a `--select a,b,`).
+    Field {
+        kept: &'a str,
+        typed: &'a str,
+    },
     Literal(Vec<String>),
-    /// Past the field part (a value, say), or not a field at all.
     Nothing,
 }
 
-/// Characters that end an unquoted field name (besides whitespace).
 const FIELD_BREAKS: &str = "=<>!+-:,";
 
 fn ends_field(c: char) -> bool {
     c.is_whitespace() || FIELD_BREAKS.contains(c)
 }
 
-/// Where in the value of the flag `kind` (`age`, `a,b`, `age >`, `name:`, `tags+=x`) the
-/// cursor is. Only the field part is completed; after it, `--where` gets operators and
-/// `--order-by` gets `asc`/`desc`, and anything else (values, other kinds' syntax) gets
-/// nothing.
+/// Where in the flag value the cursor is. Only the field part is completed; after it,
+/// `--where` gets operators, `--order-by` gets `asc`/`desc`, anything else gets nothing.
 fn field_position(kind: FieldKind, current: &str) -> FieldPosition<'_> {
     let last_comma = unquoted(current, '`')
         .filter(|&(_, c)| c == ',')
@@ -462,9 +421,6 @@ fn field_position(kind: FieldKind, current: &str) -> FieldPosition<'_> {
     }
 }
 
-// ---- Firestore lookups ----
-
-/// The root collection ids of `target`; `None` on any failure or timeout.
 fn fetch_collections(target: &DbTarget) -> Option<Vec<String>> {
     within_deadline(async {
         let fs = grpc::connect(target).await.ok()?;
@@ -473,8 +429,6 @@ fn fetch_collections(target: &DbTarget) -> Option<Vec<String>> {
     })
 }
 
-/// The field names (as Firestore renders them) of a sample of the documents in `scope`;
-/// `None` on any failure or timeout.
 fn fetch_fields(target: &DbTarget, scope: &Scope) -> Option<Vec<String>> {
     let query = Query {
         scope: scope.clone(),
@@ -512,14 +466,9 @@ fn within_deadline<T>(lookup: impl Future<Output = Option<T>>) -> Option<T> {
     found
 }
 
-// ---- cache ----
-
-/// What a lookup left in the cache.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Entry {
-    /// The lookup found these items.
     Found(Vec<String>),
-    /// The lookup failed (or timed out); do not repeat it for a while.
     Failed,
 }
 
@@ -537,9 +486,7 @@ impl Entry {
 #[derive(Debug)]
 struct Cache {
     dir: PathBuf,
-    /// How long a found answer is trusted.
     ttl: Duration,
-    /// How long a failure is remembered.
     failure_ttl: Duration,
 }
 
@@ -597,7 +544,6 @@ impl Cache {
     }
 }
 
-/// Creates `dir` and its missing parents, readable by the user only (on unix).
 fn create_private_dir(dir: &Path) -> io::Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
@@ -610,7 +556,6 @@ fn unix_seconds(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-/// The cache root: `$XDG_CACHE_HOME` if it is an absolute path, else `$HOME/.cache`.
 fn cache_base(env: &impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
     let absolute = |name: &str| env(name).map(PathBuf::from).filter(|p| p.is_absolute());
     absolute("XDG_CACHE_HOME").or_else(|| absolute("HOME").map(|home| home.join(".cache")))
@@ -818,7 +763,6 @@ mod tests {
         assert_eq!(cache.read("x", at(5)), None);
         fs::write(cache.file("x"), r#"{"written":5,"items":[1]}"#).unwrap();
         assert_eq!(cache.read("x", at(5)), None);
-        // An unwritable location is ignored, not an error.
         let blocked = dir.path().join("file");
         fs::write(&blocked, "").unwrap();
         cache_in(&blocked.join("sub")).write("x", at(5), &found(&[]));
@@ -924,14 +868,11 @@ mod tests {
         assert_eq!(cached(Some(&cache), "k", at(1_059), fail), none());
         assert_eq!(cached(Some(&cache), "k", at(1_060), fail), none());
         assert_eq!(calls.get(), 1);
-        // A minute later the lookup is tried again, and may succeed.
         assert_eq!(cached(Some(&cache), "k", at(1_061), fail), none());
         assert_eq!(calls.get(), 2);
         let ok = || Some(vec!["a".to_owned()]);
         assert_eq!(cached(Some(&cache), "k", at(1_200), ok), ["a"]);
-        // Other lookups are not held back by it.
         assert_eq!(cached(Some(&cache), "other", at(1_200), ok), ["a"]);
-        // Without a cache every call looks up.
         assert_eq!(cached(None, "k", at(1_000), fail), none());
         assert_eq!(cached(None, "k", at(1_000), fail), none());
         assert_eq!(calls.get(), 4);
@@ -977,7 +918,6 @@ mod tests {
             values(&collection_candidates(&empty, "", at(0), no_collections)),
             none()
         );
-        // Empty variables count as unset.
         let blank = Invocation::new(&words("fsq query"), &|_: &str| Some(String::new()));
         assert_eq!(blank.target, None);
         assert_eq!(blank.emulator, None);
@@ -999,7 +939,6 @@ mod tests {
             line(&["fsq", "query"], false)
         );
         assert_eq!(typed("fsq", Some(0)), line(&[], false));
-        // The line the cursor is in the middle of keeps its later words.
         assert_eq!(
             typed("fsq -- fsq query users --where X --project p", Some(4)),
             line(
@@ -1291,7 +1230,6 @@ mod tests {
         );
     }
 
-    /// An invocation of `query users` on project `p` whose cache, under `dir`, holds `fields`.
     fn seeded(dir: &Path, fields: &[&str], emulator: Option<&str>) -> Invocation {
         let env = |name: &str| match name {
             "XDG_CACHE_HOME" => Some(dir.display().to_string()),
@@ -1336,7 +1274,6 @@ mod tests {
             ["name,address", "name,address.city"]
         );
         assert_eq!(candidates(FieldKind::Where, "zzz"), none());
-        // The unquoted spelling finds a quoted name, and the candidate is the quoted one.
         assert_eq!(candidates(FieldKind::Single, "my"), ["`my-field`"]);
         assert_eq!(candidates(FieldKind::Single, "`my"), ["`my-field`"]);
         assert_eq!(lookups.get(), 0);
