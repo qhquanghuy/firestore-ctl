@@ -279,3 +279,7 @@ static binary and publishes the release; the workflow fails if the tag is not `v
 ```sh
 git tag vX.Y.Z && git push origin vX.Y.Z
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE).
