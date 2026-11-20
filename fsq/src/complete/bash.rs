@@ -3,11 +3,12 @@
 //!
 //! bash inserts a candidate exactly as printed (the registration script does not use
 //! `-o filenames`), so a field name such as `` `my-field` `` (a command substitution!), or
-//! one with spaces, `$` or `;`, would change the meaning of the line, and a name coming
-//! from a document is attacker-controlled data. Escaping needs to know whether the cursor
-//! is inside an open quote, which bash does not tell a completion function; the
+//! one with spaces, `$`, `;` or `!`, would change the meaning of the line, and a name
+//! coming from a document is attacker-controlled data. Escaping needs to know whether the
+//! cursor is inside an open quote, which bash does not tell a completion function; the
 //! registration script is therefore patched to pass the line up to the cursor in
-//! [`LINE_VAR`].
+//! [`LINE_VAR`]. Without it (the patch did not apply, or something else registered the
+//! completion) nothing but plain words is offered: the escaping fails closed.
 
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -30,52 +31,92 @@ fn is_plain(c: char) -> bool {
     c.is_ascii_alphanumeric() || "_./:,=-".contains(c)
 }
 
-/// The quote the cursor is inside of.
+/// Where the cursor is, as far as quoting goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Quote {
+enum Cursor {
+    /// Outside any quote.
+    Bare,
+    /// Inside `'...`.
     Single,
+    /// Inside `"...`.
     Double,
+    /// Not known: the command line was not passed.
+    Unknown,
 }
 
-/// The quote still open at the end of `line` (the command line up to the cursor), as bash
-/// would read it.
-fn open_quote(line: &str) -> Option<Quote> {
-    line.chars()
-        .fold((None, false), |(open, escaped), c| {
-            match (open, escaped, c) {
-                (None | Some(Quote::Double), false, '\\') => (open, true),
-                (None, false, '\'') => (Some(Quote::Single), false),
-                (None, false, '"') => (Some(Quote::Double), false),
-                (Some(Quote::Single), false, '\'') | (Some(Quote::Double), false, '"') => {
-                    (None, false)
-                }
-                // Anything else, including the character after a backslash, changes nothing.
-                _ => (open, false),
-            }
+impl Cursor {
+    /// The cursor at the end of `line` (the command line up to the cursor), as bash would
+    /// read it; [`Cursor::Unknown`] without a line.
+    fn after(line: Option<&str>) -> Self {
+        line.map_or(Self::Unknown, |line| {
+            line.chars()
+                .fold((Self::Bare, false), |(open, escaped), c| {
+                    match (open, escaped, c) {
+                        (Self::Bare | Self::Double, false, '\\') => (open, true),
+                        (Self::Bare, false, '\'') => (Self::Single, false),
+                        (Self::Bare, false, '"') => (Self::Double, false),
+                        (Self::Single, false, '\'') | (Self::Double, false, '"') => {
+                            (Self::Bare, false)
+                        }
+                        // Anything else, including the character after a backslash, changes
+                        // nothing.
+                        _ => (open, false),
+                    }
+                })
+                .0
         })
-        .0
+    }
 }
 
-/// `candidate` as one bash word inserted at the cursor, or `None` if it cannot be inserted
-/// safely (it has a control character). Outside quotes it is single-quoted unless it only
-/// has plain characters; inside an open quote only that quote's metacharacters are escaped.
-fn bash_word(candidate: &str, open: Option<Quote>) -> Option<String> {
+/// `candidate` as the text to insert at the cursor, or `None` if it cannot be inserted
+/// safely: it has a control character, or it is not a plain word and the cursor's quoting
+/// is unknown. Outside quotes it is single-quoted unless it only has plain characters;
+/// inside an open quote only that quote's metacharacters are escaped. `!` (history
+/// expansion, which applies even inside single quotes) is always backslash-escaped from
+/// outside quotes: the quote is closed around it and reopened.
+fn bash_word(candidate: &str, cursor: Cursor) -> Option<String> {
     if candidate.chars().any(char::is_control) {
         return None;
     }
-    let single = |s: &str| s.replace('\'', r"'\''");
-    Some(match open {
-        Some(Quote::Single) => single(candidate),
-        Some(Quote::Double) => candidate
-            .chars()
-            .flat_map(|c| {
-                let escape = matches!(c, '\\' | '"' | '$' | '`').then_some('\\');
-                escape.into_iter().chain([c])
-            })
-            .collect(),
-        None if candidate.chars().all(is_plain) => candidate.to_owned(),
-        None => format!("'{}'", single(candidate)),
-    })
+    let single = |s: &str| s.replace('\'', r"'\''").replace('!', r"'\!'");
+    match cursor {
+        _ if candidate.chars().all(is_plain) => Some(candidate.to_owned()),
+        Cursor::Unknown => None,
+        Cursor::Bare => Some(format!("'{}'", single(candidate))),
+        Cursor::Single => Some(single(candidate)),
+        Cursor::Double => Some(
+            candidate
+                .chars()
+                .flat_map(|c| match c {
+                    '\\' | '"' | '$' | '`' => vec!['\\', c],
+                    '!' => vec!['"', '\\', '!', '"'],
+                    _ => vec![c],
+                })
+                .collect(),
+        ),
+    }
+}
+
+/// The candidates that can be offered at the end of `line`, ready to insert.
+fn bash_words<'a>(
+    candidates: impl IntoIterator<Item = &'a str>,
+    line: Option<&str>,
+) -> Vec<String> {
+    let cursor = Cursor::after(line);
+    candidates
+        .into_iter()
+        .filter_map(|candidate| bash_word(candidate, cursor))
+        .collect()
+}
+
+/// `script`, `clap_complete`'s bash registration, passing the command line up to the
+/// cursor to the binary. A script this does not recognise is returned as it is: it works,
+/// and without the line only plain candidates are offered.
+fn with_line_passed(script: &str) -> String {
+    script.replace(
+        ANCHOR,
+        &format!("{ANCHOR}        {LINE_VAR}=\"${{COMP_LINE:0:COMP_POINT}}\" \\\n"),
+    )
 }
 
 /// `clap_complete`'s bash adapter with escaped candidates.
@@ -101,11 +142,7 @@ impl EnvCompleter for FsqBash {
     ) -> io::Result<()> {
         let mut script = Vec::new();
         Bash.write_registration(var, name, bin, completer, &mut script)?;
-        let script = String::from_utf8_lossy(&script).replace(
-            ANCHOR,
-            &format!("{ANCHOR}        {LINE_VAR}=\"${{COMP_LINE:0:COMP_POINT}}\" \\\n"),
-        );
-        buf.write_all(script.as_bytes())
+        buf.write_all(with_line_passed(&String::from_utf8_lossy(&script)).as_bytes())
     }
 
     fn write_complete(
@@ -120,14 +157,18 @@ impl EnvCompleter for FsqBash {
             .and_then(|i| i.parse().ok())
             .unwrap_or_default();
         let ifs = std::env::var("_CLAP_IFS").unwrap_or_else(|_| "\n".to_owned());
-        let open = std::env::var(LINE_VAR)
-            .ok()
-            .and_then(|line| open_quote(&line));
-        let words = complete(cmd, args, index, current_dir)?
-            .iter()
-            .filter_map(|c| bash_word(&c.get_value().to_string_lossy(), open))
-            .join(&ifs);
-        buf.write_all(words.as_bytes())
+        let line = std::env::var(LINE_VAR).ok();
+        let candidates = complete(cmd, args, index, current_dir)?;
+        let words = bash_words(
+            candidates
+                .iter()
+                .map(|c| c.get_value().to_string_lossy().into_owned())
+                .collect_vec()
+                .iter()
+                .map(String::as_str),
+            line.as_deref(),
+        );
+        buf.write_all(words.join(&ifs).as_bytes())
     }
 }
 
@@ -139,20 +180,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn open_quote_follows_bash_quoting() {
-        assert_eq!(open_quote("fsq query users"), None);
-        assert_eq!(open_quote("fsq --where 'age"), Some(Quote::Single));
-        assert_eq!(open_quote("fsq --where 'age == 1' --sel"), None);
-        assert_eq!(open_quote(r#"fsq --where "a"#), Some(Quote::Double));
-        assert_eq!(open_quote(r#"fsq --where "a \" b"#), Some(Quote::Double));
-        assert_eq!(open_quote(r"fsq a\'b"), None);
-        assert_eq!(open_quote(r#"fsq 'it"s"#), Some(Quote::Single));
-        assert_eq!(open_quote(r#"fsq "it's""#), None);
-        assert_eq!(open_quote(r"fsq 'a\"), Some(Quote::Single));
+    fn the_cursor_follows_bash_quoting() {
+        let after = |line| Cursor::after(Some(line));
+        assert_eq!(after("fsq query users"), Cursor::Bare);
+        assert_eq!(after("fsq --where 'age"), Cursor::Single);
+        assert_eq!(after("fsq --where 'age == 1' --sel"), Cursor::Bare);
+        assert_eq!(after(r#"fsq --where "a"#), Cursor::Double);
+        assert_eq!(after(r#"fsq --where "a \" b"#), Cursor::Double);
+        assert_eq!(after(r"fsq a\'b"), Cursor::Bare);
+        assert_eq!(after(r#"fsq 'it"s"#), Cursor::Single);
+        assert_eq!(after(r#"fsq "it's""#), Cursor::Bare);
+        assert_eq!(after(r"fsq 'a\"), Cursor::Single);
+        assert_eq!(Cursor::after(None), Cursor::Unknown);
     }
 
     #[test]
-    fn plain_words_are_left_alone() {
+    fn plain_words_are_left_alone_in_every_context() {
         for plain in [
             "users",
             "--where",
@@ -162,13 +205,20 @@ mod tests {
             "x-y",
             "a:b",
         ] {
-            assert_eq!(bash_word(plain, None).as_deref(), Some(plain));
+            for cursor in [
+                Cursor::Bare,
+                Cursor::Single,
+                Cursor::Double,
+                Cursor::Unknown,
+            ] {
+                assert_eq!(bash_word(plain, cursor).as_deref(), Some(plain));
+            }
         }
     }
 
     #[test]
     fn unquoted_candidates_are_single_quoted() {
-        let word = |s| bash_word(s, None).unwrap();
+        let word = |s| bash_word(s, Cursor::Bare).unwrap();
         assert_eq!(word("`my-field`"), "'`my-field`'");
         assert_eq!(word("a b"), "'a b'");
         assert_eq!(word("$(rm -rf ~)"), "'$(rm -rf ~)'");
@@ -176,36 +226,81 @@ mod tests {
         assert_eq!(word("it's"), r"'it'\''s'");
         assert_eq!(word("`a'b`"), r"'`a'\''b`'");
         assert_eq!(word("(default)"), "'(default)'");
+        assert_eq!(word("a!b"), r"'a'\!'b'");
     }
 
     #[test]
     fn candidates_inside_an_open_quote_escape_only_that_quote() {
-        let single = |s| bash_word(s, Some(Quote::Single)).unwrap();
+        let single = |s| bash_word(s, Cursor::Single).unwrap();
         assert_eq!(single("`my-field` == x"), "`my-field` == x");
         assert_eq!(single("it's"), r"it'\''s");
-        let double = |s| bash_word(s, Some(Quote::Double)).unwrap();
+        assert_eq!(single("a!b"), r"a'\!'b");
+        let double = |s| bash_word(s, Cursor::Double).unwrap();
         assert_eq!(double("`my-field` $x"), r"\`my-field\` \$x");
         assert_eq!(double(r#"a"b\c"#), r#"a\"b\\c"#);
+        assert_eq!(double("a!b"), r#"a"\!"b"#);
         assert_eq!(double("plain"), "plain");
     }
 
     #[test]
     fn control_characters_drop_the_candidate() {
-        for open in [None, Some(Quote::Single), Some(Quote::Double)] {
-            assert_eq!(bash_word("a\nb", open), None);
-            assert_eq!(bash_word("a\u{b}b", open), None);
-            assert_eq!(bash_word("a\u{1b}[31m", open), None);
+        for cursor in [
+            Cursor::Bare,
+            Cursor::Single,
+            Cursor::Double,
+            Cursor::Unknown,
+        ] {
+            assert_eq!(bash_word("a\nb", cursor), None);
+            assert_eq!(bash_word("a\u{b}b", cursor), None);
+            assert_eq!(bash_word("a\u{1b}[31m", cursor), None);
         }
     }
 
-    /// The escaped word, evaluated by a real bash, is the candidate again.
+    #[test]
+    fn an_unknown_cursor_offers_plain_words_only() {
+        let candidates = [
+            "users",
+            "`my-field`",
+            "a b",
+            "name",
+            "--where",
+            "$(x)",
+            "a!b",
+        ];
+        assert_eq!(bash_words(candidates, None), ["users", "name", "--where"]);
+        // With the line, the same candidates are all offered, quoted for the context.
+        assert_eq!(
+            bash_words(candidates, Some("fsq query users --select ")),
+            [
+                "users",
+                "'`my-field`'",
+                "'a b'",
+                "name",
+                "--where",
+                "'$(x)'",
+                r"'a'\!'b'"
+            ]
+        );
+    }
+
+    /// What a real bash makes of `prefix`, the escaped candidate and `suffix`.
+    fn evaluated(prefix: &str, word: &str, suffix: &str) -> String {
+        let out = std::process::Command::new("bash")
+            .args(["-c", &format!("printf %s {prefix}{word}{suffix}")])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// The escaped word, evaluated by a real bash in the context it was escaped for, is
+    /// the candidate again (the surrounding quotes being what the user had typed).
     #[test]
     fn escaped_words_round_trip_through_bash() {
         let Ok(bash) = std::process::Command::new("bash").arg("--version").output() else {
             return;
         };
         assert!(bash.status.success());
-        for candidate in [
+        let candidates = [
             "`my-field`",
             "a b",
             "$(echo pwned)",
@@ -213,13 +308,24 @@ mod tests {
             "a;b",
             "x\\y",
             "(default)",
-        ] {
-            let word = bash_word(candidate, None).unwrap();
-            let out = std::process::Command::new("bash")
-                .args(["-c", &format!("printf %s {word}")])
-                .output()
-                .unwrap();
-            assert_eq!(String::from_utf8_lossy(&out.stdout), candidate);
+            "a!b",
+            "say \"hi\" $HOME `id`",
+        ];
+        for candidate in candidates {
+            let bare = bash_word(candidate, Cursor::Bare).unwrap();
+            assert_eq!(evaluated("", &bare, ""), candidate, "bare {bare}");
+            let single = bash_word(candidate, Cursor::Single).unwrap();
+            assert_eq!(
+                evaluated("'<", &single, ">'"),
+                format!("<{candidate}>"),
+                "single {single}"
+            );
+            let double = bash_word(candidate, Cursor::Double).unwrap();
+            assert_eq!(
+                evaluated("\"<", &double, ">\""),
+                format!("<{candidate}>"),
+                "double {double}"
+            );
         }
     }
 
@@ -233,5 +339,14 @@ mod tests {
         assert!(script.contains("_FSQ_COMP_LINE=\"${COMP_LINE:0:COMP_POINT}\""));
         assert!(script.contains("FSQ_COMPLETE=\"bash\""));
         assert!(script.contains("_CLAP_COMPLETE_INDEX"));
+    }
+
+    #[test]
+    fn an_unrecognised_script_is_left_as_it_is() {
+        // The anchor is gone: nothing is patched, so no line will be passed, so only plain
+        // words get offered (see `an_unknown_cursor_offers_plain_words_only`).
+        let other = "_other() { :; }\ncomplete -F _other fsq\n";
+        assert_eq!(with_line_passed(other), other);
+        assert!(!with_line_passed(other).contains(LINE_VAR));
     }
 }

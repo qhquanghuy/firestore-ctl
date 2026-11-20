@@ -619,7 +619,10 @@ fn completing_operators_needs_no_database() {
 /// `collections` of the database and, per collection, the `fields` sampled from it.
 fn seeded_cache(collections: &[&str], fields: &[(&str, &[&str])]) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("fsq/p/(default)");
+    // `fsq()` points every run at the emulator 127.0.0.1:1, whose answers are cached apart.
+    let db = dir
+        .path()
+        .join("fsq/p/(default)/emulator-127%2E0%2E0%2E1%3A1");
     std::fs::create_dir_all(&db).unwrap();
     let written = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -634,13 +637,12 @@ fn seeded_cache(collections: &[&str], fields: &[(&str, &[&str])]) -> tempfile::T
     dir
 }
 
-/// `completion_line` against the database `cache` describes: no lookup is made (the
-/// emulator variable is dropped, so a lookup would reach the real service).
+/// `completion_line` against the database `cache` describes. A lookup the cache does not
+/// answer fails at once, against the dead emulator port of `fsq()`: no test can reach a
+/// real service.
 fn completion_cached(cache: &tempfile::TempDir, words: &[&str], line: Option<&str>) -> Command {
     let mut cmd = completion_line(words, line);
-    cmd.env("XDG_CACHE_HOME", cache.path())
-        .env_remove("FIRESTORE_EMULATOR_HOST")
-        .env("GOOGLE_APPLICATION_CREDENTIALS", "/nonexistent");
+    cmd.env("XDG_CACHE_HOME", cache.path());
     cmd
 }
 
@@ -712,4 +714,21 @@ fn cached_fields_are_offered_per_flag() {
     // Other flags' syntax is not completed.
     assert_eq!(offered("--select", "na ", None), Vec::<String>::new());
     assert_eq!(offered("--order-by", "name,a", None), Vec::<String>::new());
+}
+
+#[test]
+fn without_the_command_line_only_plain_candidates_are_offered() {
+    // A bash registration that does not pass the cursor's quoting (an older script, or one
+    // not made by `fsq completions`): names that need quoting are left out, not guessed.
+    let fields: &[&str] = &["name", "`my-field`", "a b"];
+    let cache = seeded_cache(&["users"], &[("users", fields)]);
+    let words = ["fsq", "--project", "p", "query", "users", "--select", ""];
+    let mut cmd = completion_cached(&cache, &words, None);
+    cmd.env_remove("_FSQ_COMP_LINE");
+    assert_eq!(candidates_of(cmd), ["name"]);
+    // With the line they are offered, quoted.
+    assert_eq!(
+        candidates_of(completion_cached(&cache, &words, None)),
+        ["name", "'`my-field`'", "'a b'"]
+    );
 }

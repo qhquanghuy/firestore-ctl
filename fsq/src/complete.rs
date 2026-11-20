@@ -86,6 +86,7 @@ pub fn collection_completer() -> ArgValueCompleter {
                 &Invocation::from_process(),
                 current,
                 SystemTime::now(),
+                fetch_collections,
             ))
         })
     })
@@ -116,6 +117,7 @@ pub fn field_completer(kind: FieldKind) -> ArgValueCompleter {
                 kind,
                 current,
                 SystemTime::now(),
+                fetch_fields,
             ))
         })
     })
@@ -329,17 +331,16 @@ fn collection_candidates(
     inv: &Invocation,
     current: &str,
     now: SystemTime,
+    fetch: impl FnOnce(&DbTarget) -> Option<Vec<String>>,
 ) -> Vec<CompletionCandidate> {
     let (false, Some(target)) = (inv.detached, &inv.target) else {
         return Vec::new();
     };
-    cached(inv.cache().as_ref(), "collections", now, || {
-        fetch_collections(target)
-    })
-    .into_iter()
-    .filter(|id| id.starts_with(current))
-    .map(CompletionCandidate::new)
-    .collect()
+    cached(inv.cache().as_ref(), "collections", now, || fetch(target))
+        .into_iter()
+        .filter(|id| id.starts_with(current))
+        .map(CompletionCandidate::new)
+        .collect()
 }
 
 /// Candidates for the word `current` of the flag value `kind`. zsh hands over the word
@@ -350,6 +351,7 @@ fn field_candidates(
     kind: FieldKind,
     current: &str,
     now: SystemTime,
+    fetch: impl FnOnce(&DbTarget, &Scope) -> Option<Vec<String>>,
 ) -> Vec<CompletionCandidate> {
     if inv.detached {
         return Vec::new();
@@ -363,7 +365,7 @@ fn field_candidates(
             .zip(inv.scope.as_ref())
             .map(|(target, scope)| {
                 cached(inv.cache().as_ref(), &fields_cache_name(scope), now, || {
-                    fetch_fields(target, scope)
+                    fetch(target, scope)
                 })
             })
             .unwrap_or_default()
@@ -715,6 +717,15 @@ mod tests {
         Vec::new()
     }
 
+    /// The lookups of tests: none succeeds and none touches a real service.
+    fn no_collections(_: &DbTarget) -> Option<Vec<String>> {
+        None
+    }
+
+    fn no_fields(_: &DbTarget, _: &Scope) -> Option<Vec<String>> {
+        None
+    }
+
     #[test]
     fn field_names_include_nested() {
         let data = [
@@ -948,14 +959,23 @@ mod tests {
     fn completer_is_silent_without_project() {
         let inv = Invocation::new(&words("fsq query users --where"), &no_env);
         assert_eq!(inv.target, None);
-        assert_eq!(values(&collection_candidates(&inv, "", at(0))), none());
+        assert_eq!(
+            values(&collection_candidates(&inv, "", at(0), no_collections)),
+            none()
+        );
         for kind in [FieldKind::Where, FieldKind::Select] {
             for typed in ["", "na"] {
-                assert_eq!(values(&field_candidates(&inv, kind, typed, at(0))), none());
+                assert_eq!(
+                    values(&field_candidates(&inv, kind, typed, at(0), no_fields)),
+                    none()
+                );
             }
         }
         let empty = Invocation::new(&[], &no_env);
-        assert_eq!(values(&collection_candidates(&empty, "", at(0))), none());
+        assert_eq!(
+            values(&collection_candidates(&empty, "", at(0), no_collections)),
+            none()
+        );
         // Empty variables count as unset.
         let blank = Invocation::new(&words("fsq query"), &|_: &str| Some(String::new()));
         assert_eq!(blank.target, None);
@@ -1187,7 +1207,13 @@ mod tests {
     fn a_leading_shell_quote_is_ignored() {
         let inv = Invocation::new(&words("fsq query users"), &no_env);
         assert_eq!(
-            values(&field_candidates(&inv, FieldKind::Where, "'age >", at(0))),
+            values(&field_candidates(
+                &inv,
+                FieldKind::Where,
+                "'age >",
+                at(0),
+                no_fields
+            )),
             ["age >", "age >="]
         );
         assert_eq!(
@@ -1195,7 +1221,8 @@ mod tests {
                 &inv,
                 FieldKind::OrderBy,
                 "\"age:d",
-                at(0)
+                at(0),
+                no_fields
             )),
             ["age:desc"]
         );
@@ -1207,9 +1234,18 @@ mod tests {
             detached: true,
             ..Invocation::new(&words("fsq --project p query users"), &no_env)
         };
-        assert_eq!(values(&collection_candidates(&inv, "x", at(0))), none());
         assert_eq!(
-            values(&field_candidates(&inv, FieldKind::OrderBy, "d", at(0))),
+            values(&collection_candidates(&inv, "x", at(0), no_collections)),
+            none()
+        );
+        assert_eq!(
+            values(&field_candidates(
+                &inv,
+                FieldKind::OrderBy,
+                "d",
+                at(0),
+                no_fields
+            )),
             none()
         );
     }
@@ -1243,7 +1279,13 @@ mod tests {
     fn literal_candidates_need_no_database() {
         let inv = Invocation::new(&words("fsq query users"), &no_env);
         assert_eq!(
-            values(&field_candidates(&inv, FieldKind::OrderBy, "age:", at(0))),
+            values(&field_candidates(
+                &inv,
+                FieldKind::OrderBy,
+                "age:",
+                at(0),
+                no_fields
+            )),
             ["age:asc", "age:desc"]
         );
     }
@@ -1271,7 +1313,14 @@ mod tests {
             &["address", "address.city", "name", "`my-field`"],
             None,
         );
-        let candidates = |kind, typed| values(&field_candidates(&inv, kind, typed, at(200)));
+        // Everything is in the cache: a lookup (which could reach a real service) is a bug.
+        let lookups = Cell::new(0);
+        let fields = |_: &DbTarget, _: &Scope| {
+            lookups.set(lookups.get() + 1);
+            None
+        };
+        let candidates =
+            |kind, typed| values(&field_candidates(&inv, kind, typed, at(200), fields));
         assert_eq!(
             candidates(FieldKind::Single, ""),
             ["address", "address.city", "name", "`my-field`"]
@@ -1289,18 +1338,67 @@ mod tests {
         // The unquoted spelling finds a quoted name, and the candidate is the quoted one.
         assert_eq!(candidates(FieldKind::Single, "my"), ["`my-field`"]);
         assert_eq!(candidates(FieldKind::Single, "`my"), ["`my-field`"]);
+        assert_eq!(lookups.get(), 0);
+    }
+
+    #[test]
+    fn a_cache_miss_looks_up_once_with_the_typed_database_and_collection() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = |name: &str| (name == "XDG_CACHE_HOME").then(|| dir.path().display().to_string());
+        let inv = Invocation::new(&words("fsq --project p --database d query users"), &env);
+        let seen = std::cell::RefCell::new(Vec::new());
+        let fields = |target: &DbTarget, scope: &Scope| {
+            seen.borrow_mut()
+                .push(format!("{}/{} {scope:?}", target.project, target.database));
+            Some(vec!["a".to_owned()])
+        };
+        let ask = || {
+            values(&field_candidates(
+                &inv,
+                FieldKind::Single,
+                "",
+                at(5),
+                fields,
+            ))
+        };
+        assert_eq!(ask(), ["a"]);
+        assert_eq!(ask(), ["a"]);
+        assert_eq!(seen.borrow().len(), 1);
+        assert!(seen.borrow()[0].starts_with("p/d "), "{:?}", seen.borrow());
     }
 
     #[test]
     fn emulator_data_is_cached_apart() {
         let dir = tempfile::tempdir().unwrap();
         let inv = seeded(dir.path(), &["only_in_emulator"], Some("localhost:8080"));
-        let candidates =
-            |inv: &Invocation| values(&field_candidates(inv, FieldKind::Single, "", at(200)));
-        assert_eq!(candidates(&inv), ["only_in_emulator"]);
-        let env = |name: &str| (name == "XDG_CACHE_HOME").then(|| dir.path().display().to_string());
-        let production = Invocation::new(&words("fsq --project p query users"), &env);
-        // Not the emulator's answer; a lookup is made (and fails here: nothing listens).
-        assert_ne!(candidates(&production), ["only_in_emulator"]);
+        let scope = inv.scope.clone().unwrap();
+        let name = fields_cache_name(&scope);
+        assert_eq!(
+            inv.cache().unwrap().read(&name, at(200)),
+            Some(found(&["only_in_emulator"]))
+        );
+        // The same database without the emulator, and another emulator, have their own
+        // caches, which hold nothing of it. (Only the caches are looked at: no lookup.)
+        let root = dir.path().display().to_string();
+        let in_dir = |emulator: Option<&'static str>| {
+            let root = root.clone();
+            let env = move |var: &str| match var {
+                "XDG_CACHE_HOME" => Some(root.clone()),
+                "FIRESTORE_EMULATOR_HOST" => emulator.map(str::to_owned),
+                _ => None,
+            };
+            Invocation::new(&words("fsq --project p query users"), &env)
+                .cache()
+                .unwrap()
+        };
+        for other in [None, Some("localhost:9090"), Some("localhost:80801")] {
+            let cache = in_dir(other);
+            assert_ne!(cache.dir, inv.cache().unwrap().dir);
+            assert_eq!(cache.read(&name, at(200)), None, "{other:?}");
+        }
+        assert_eq!(
+            in_dir(Some("localhost:8080")).read(&name, at(200)),
+            Some(found(&["only_in_emulator"]))
+        );
     }
 }
