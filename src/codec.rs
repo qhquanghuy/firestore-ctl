@@ -70,8 +70,14 @@ fn double_json(f: f64) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::{plain_json, typed_json};
+    use crate::domain::arb;
     use crate::domain::document::Document;
+    use crate::domain::path::DocPath;
     use crate::domain::value::{Fields, GeoPoint, Timestamp, UpdateTime, Value};
+    use proptest::collection::{btree_map, vec};
+    use proptest::prelude::*;
+    use proptest::sample::select;
+    use serde_json::Value as Json;
     use serde_json::json;
 
     fn ts(s: &str) -> Timestamp {
@@ -138,12 +144,6 @@ mod tests {
     }
 
     #[test]
-    fn input_accepts_bare_data_or_full_document() {
-        let full = typed_json::document_to_json(&sample_doc("2026-11-20T00:00:00Z"));
-        assert_eq!(fields_from_input(&full), fields_from_input(&full["data"]));
-    }
-
-    #[test]
     fn user_field_named_path_does_not_collide() {
         let j = json!({"_path": "teams/t1", "data": {"_path": "mine"}});
         assert_eq!(
@@ -164,13 +164,6 @@ mod tests {
             Value::Timestamp(ts("2026-01-05T10:00:00Z")),
         ));
         assert_eq!(j["data"]["t"], "2026-01-05T10:00:00Z");
-    }
-
-    #[test]
-    fn int_extremes_roundtrip_through_text() {
-        for i in [i64::MIN, i64::MAX, 0, -1] {
-            assert_eq!(through_text(&Value::Int(i)), Ok(Value::Int(i)));
-        }
     }
 
     #[test]
@@ -323,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn markers_are_reserved_even_without_a_path_or_update_time() {
+    fn a_marker_alone_makes_a_full_document() {
         let stripped = typed_json::parse_input(&json!({
             "_plain": true,
             "_select": ["a"],
@@ -334,7 +327,19 @@ mod tests {
         assert!(envelope.plain);
         assert_eq!(envelope.select.map(|s| s.len()), Some(1));
         assert_eq!(envelope.path, None);
-        assert_eq!(stripped.fields.keys().collect::<Vec<_>>(), ["data"]);
+        assert_eq!(stripped.fields.keys().collect::<Vec<_>>(), ["a"]);
+        for marked in [
+            json!({"_plain": true, "a": 1}),
+            json!({"_select": ["a"], "a": 1}),
+        ] {
+            assert!(
+                typed_json::parse_input(&marked)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("inside `data`"),
+                "{marked}"
+            );
+        }
         assert_eq!(
             typed_json::parse_input(&json!({"a": 1})).unwrap().envelope,
             None
@@ -411,14 +416,6 @@ mod tests {
     }
 
     #[test]
-    fn negative_zero_keeps_its_sign() {
-        assert!(matches!(
-            through_text(&Value::Double(-0.0)),
-            Ok(Value::Double(z)) if z.is_sign_negative()
-        ));
-    }
-
-    #[test]
     fn double_tag_accepts_integer_and_rejects_other_strings() {
         assert_eq!(
             typed_json::value_from_json(&json!({"$double": 1})),
@@ -429,28 +426,9 @@ mod tests {
     }
 
     #[test]
-    fn maps_with_a_single_dollar_key_roundtrip() {
-        for key in ["$ts", "$foo", "$map", "$double"] {
-            let m = Value::Map([(key.to_owned(), Value::Int(1))].into_iter().collect());
-            assert_eq!(through_text(&m), Ok(m.clone()), "{key}");
-            let nested = Value::Array(vec![Value::Map(
-                [(key.to_owned(), m.clone())].into_iter().collect(),
-            )]);
-            assert_eq!(through_text(&nested), Ok(nested.clone()), "nested {key}");
-        }
-    }
-
-    #[test]
     fn multi_key_map_with_dollar_key_is_plain_map() {
         let j = json!({"$ts": "x", "other": 1});
         assert!(matches!(typed_json::value_from_json(&j), Ok(Value::Map(m)) if m.len() == 2));
-    }
-
-    #[test]
-    fn document_with_field_named_like_a_tag_roundtrips() {
-        let doc = sample_doc_with("$ts", Value::Int(7));
-        let j = typed_json::document_to_json(&doc);
-        assert_eq!(fields_from_input(&j), Ok(doc.data));
     }
 
     #[test]
@@ -503,5 +481,285 @@ mod tests {
             plain_json::value_to_json(&v),
             json!({"d": 1.5, "nan": "NaN", "b": "AP8=", "r": "teams/t1", "g": {"lat": 1.5, "lng": -2.0}, "i": 3})
         );
+    }
+
+    const ENVELOPE_KEYS: [&str; 4] = ["_path", "_updateTime", "_plain", "_select"];
+
+    fn json_key() -> impl Strategy<Value = String> {
+        let special = select(vec![
+            "$ts",
+            "$ref",
+            "$double",
+            "$bytes",
+            "$geo",
+            "$map",
+            "$nope",
+            "_path",
+            "_updateTime",
+            "_plain",
+            "_select",
+            "data",
+            "lat",
+            "lng",
+        ])
+        .prop_map(str::to_owned);
+        prop_oneof![3 => special, 1 => arb::text()]
+    }
+
+    // Biased to what the decoder special-cases: tags, envelope keys, `u64` above `i64::MAX`,
+    // integral doubles beyond `i64`, and strings a tag accepts. An array in an array is legal
+    // input here, because the decoder must reject it, not panic.
+    fn arbitrary_json() -> impl Strategy<Value = Json> {
+        let strings = prop_oneof![
+            3 => arb::text(),
+            2 => select(vec![
+                "NaN",
+                "Infinity",
+                "-Infinity",
+                "AP8=",
+                "!!!",
+                "2026-01-05T10:00:00Z",
+                "teams/t1",
+                "teams",
+                "projects/p/databases/d/documents/users/u1",
+                "a.`b c`",
+            ])
+            .prop_map(str::to_owned),
+        ];
+        let numbers = prop_oneof![
+            any::<i64>().prop_map(Json::from),
+            ((1_u64 << 63)..=u64::MAX).prop_map(Json::from),
+            any::<f64>().prop_map(Json::from),
+            select(vec![1e30, 9.3e18, -0.0, 1.0, 5e-324, 91.0, -181.0]).prop_map(Json::from),
+        ];
+        let tagged = prop_oneof![
+            select(vec!["NaN", "Infinity", "-Infinity"]).prop_map(|s| json!({"$double": s})),
+            Just(json!({"$ts": "2026-01-05T10:00:00.123456789Z"})),
+            Just(json!({"$ref": "teams/t1"})),
+            Just(json!({"$ref": "projects/p/databases/d/documents/users/u1"})),
+            Just(json!({"$bytes": "AP8="})),
+            (-100.0..100.0_f64, -200.0..200.0_f64)
+                .prop_map(|(lat, lng)| json!({"$geo": {"lat": lat, "lng": lng}})),
+        ];
+        let leaf = prop_oneof![
+            1 => Just(Json::Null),
+            1 => any::<bool>().prop_map(Json::Bool),
+            3 => numbers,
+            3 => strings.prop_map(Json::String),
+            2 => tagged,
+        ];
+        leaf.prop_recursive(3, 24, 6, |inner| {
+            prop_oneof![
+                vec(inner.clone(), 0..=6).prop_map(Json::Array),
+                btree_map(json_key(), inner, 0..=4)
+                    .prop_map(|entries| Json::Object(entries.into_iter().collect())),
+            ]
+        })
+    }
+
+    // A document path that starts with `projects/` must not be read as a resource name.
+    fn projects_ref() -> impl Strategy<Value = DocPath> {
+        let prefix = select(vec!["projects/x/", "projects/p/databases/d/"]);
+        (prefix, arb::doc_path()).prop_filter_map("a document path", |(prefix, p)| {
+            format!("{prefix}{p}").parse().ok()
+        })
+    }
+
+    fn walk_json<'a>(j: &'a Json, depth: usize, out: &mut Vec<(usize, &'a Json)>) {
+        out.push((depth, j));
+        match j {
+            Json::Array(xs) => {
+                for x in xs {
+                    walk_json(x, depth + 1, out);
+                }
+            }
+            Json::Object(o) => {
+                for x in o.values() {
+                    walk_json(x, depth + 1, out);
+                }
+            }
+            Json::Null | Json::Bool(_) | Json::Number(_) | Json::String(_) => {}
+        }
+    }
+
+    #[test]
+    fn projects_ref_reaches_both_prefixes() {
+        use proptest::strategy::ValueTree as _;
+        use proptest::test_runner::TestRunner;
+
+        let strategy = projects_ref();
+        let mut runner = TestRunner::deterministic();
+        let paths: Vec<String> = (0..1_000)
+            .map(|_| {
+                strategy
+                    .new_tree(&mut runner)
+                    .unwrap()
+                    .current()
+                    .to_string()
+            })
+            .collect();
+        for prefix in ["projects/x/", "projects/p/databases/d/"] {
+            assert!(
+                paths.iter().any(|p| p.starts_with(prefix)),
+                "no sample with prefix: {prefix}"
+            );
+        }
+    }
+
+    #[test]
+    fn arbitrary_json_reaches_its_classes() {
+        use proptest::strategy::ValueTree as _;
+        use proptest::test_runner::TestRunner;
+
+        let strategy = arbitrary_json();
+        let mut runner = TestRunner::deterministic();
+        let trees: Vec<Json> = (0..1_000)
+            .map(|_| strategy.new_tree(&mut runner).unwrap().current())
+            .collect();
+        let mut nodes = Vec::new();
+        for tree in &trees {
+            walk_json(tree, 0, &mut nodes);
+        }
+        let reaches = |class: &str, is_member: &dyn Fn(&(usize, &Json)) -> bool| {
+            assert!(nodes.iter().any(is_member), "no sample in class: {class}");
+        };
+        let has_key = |j: &Json, key: &str| j.as_object().is_some_and(|o| o.contains_key(key));
+        reaches("object with an envelope key", &|&(_, j)| {
+            ENVELOPE_KEYS.iter().any(|k| has_key(j, k))
+        });
+        reaches("envelope key beside a data object", &|&(_, j)| {
+            ENVELOPE_KEYS.iter().any(|k| has_key(j, k))
+                && j.get("data").is_some_and(Json::is_object)
+        });
+        reaches("sole tag object", &|&(_, j)| {
+            j.as_object()
+                .is_some_and(|o| o.len() == 1 && o.keys().all(|k| k.starts_with('$')))
+        });
+        reaches("number above i64::MAX", &|&(_, j)| {
+            j.is_u64() && j.as_i64().is_none()
+        });
+        reaches("integral double beyond i64", &|&(_, j)| {
+            j.is_f64()
+                && j.as_f64()
+                    .is_some_and(|f| f.fract() == 0.0 && f.abs() >= 9.2e18)
+        });
+        reaches("untagged non-integral double", &|&(_, j)| {
+            j.is_f64() && j.as_f64().is_some_and(|f| f.fract() != 0.0)
+        });
+        reaches("array directly inside an array", &|&(_, j)| {
+            j.as_array().is_some_and(|xs| xs.iter().any(Json::is_array))
+        });
+        reaches("string a tag accepts", &|&(_, j)| {
+            matches!(j.as_str(), Some("NaN" | "Infinity" | "-Infinity" | "AP8="))
+        });
+        reaches("object nested two deep", &|&(depth, j)| {
+            depth == 2 && j.is_object()
+        });
+        let decoded: Vec<_> = trees.iter().map(typed_json::parse_input).collect();
+        assert!(decoded.iter().any(Result::is_ok), "no input decodes");
+        assert!(decoded.iter().any(Result::is_err), "no input is rejected");
+        let values: Vec<_> = trees.iter().map(typed_json::value_from_json).collect();
+        assert!(
+            values.iter().any(|v| matches!(v, Ok(Value::Map(_)))),
+            "no object decodes to a map"
+        );
+        assert!(
+            values.iter().any(|v| matches!(
+                v,
+                Ok(Value::Timestamp(_) | Value::Ref(_) | Value::Bytes(_) | Value::Geo(_))
+            )),
+            "no tag decodes"
+        );
+    }
+
+    proptest! {
+        #![proptest_config(arb::config())]
+
+        #[test]
+        fn a_value_round_trips_in_memory_and_through_text(v in arb::value()) {
+            let direct = typed_json::value_from_json(&typed_json::value_to_json(&v));
+            prop_assert!(direct.as_ref().is_ok_and(|back| arb::same(back, &v)), "{direct:?}");
+            let text = through_text(&v);
+            prop_assert!(text.as_ref().is_ok_and(|back| arb::same(back, &v)), "{text:?}");
+        }
+
+        #[test]
+        fn a_ref_under_projects_stays_a_ref(path in projects_ref()) {
+            let v = Value::Ref(path);
+            let text = through_text(&v);
+            prop_assert_eq!(text, Ok(v));
+        }
+
+        #[test]
+        fn a_full_document_round_trips_without_markers(d in arb::document()) {
+            let input = typed_json::parse_input(&typed_json::document_to_json(&d));
+            prop_assert!(
+                input.as_ref().is_ok_and(|i| {
+                    arb::same_fields(&i.fields, &d.data)
+                        && i.envelope.as_ref().is_some_and(|e| {
+                            e.path.as_ref() == Some(&d.path)
+                                && e.update_time == Some(d.update_time)
+                                && !e.plain
+                                && e.select.is_none()
+                        })
+                }),
+                "{input:?}"
+            );
+        }
+
+        #[test]
+        fn a_selection_marker_survives_beside_the_fields(
+            d in arb::document(),
+            select in vec(arb::field_path(), 0..=3),
+        ) {
+            let marked = super::mark_selected(typed_json::document_to_json(&d), &select);
+            let input = typed_json::parse_input(&marked);
+            prop_assert!(
+                input.as_ref().is_ok_and(|i| {
+                    arb::same_fields(&i.fields, &d.data)
+                        && i.envelope.as_ref().is_some_and(|e| e.select.as_ref() == Some(&select))
+                }),
+                "{input:?}"
+            );
+        }
+
+        #[test]
+        fn plain_output_carries_the_plain_marker_through_parsing(d in arb::document()) {
+            let json = plain_json::document_to_json(&d);
+            prop_assert_eq!(&json["_plain"], &Json::Bool(true));
+            if let Ok(input) = typed_json::parse_input(&json) {
+                prop_assert!(input.envelope.is_some_and(|e| e.plain), "{json}");
+            }
+        }
+
+        #[test]
+        fn bare_data_has_no_envelope(fields in arb::fields()) {
+            let fields: Fields = fields
+                .into_iter()
+                .filter(|(key, _)| !ENVELOPE_KEYS.contains(&key.as_str()))
+                .collect();
+            let bare = Json::Object(super::fields_to_object(&fields, typed_json::value_to_json));
+            let input = typed_json::parse_input(&bare);
+            prop_assert!(
+                input.as_ref().is_ok_and(|i| {
+                    i.envelope.is_none() && arb::same_fields(&i.fields, &fields)
+                }),
+                "{input:?}"
+            );
+        }
+
+        #[test]
+        fn decoding_arbitrary_json_returns(j in arbitrary_json()) {
+            typed_json::parse_input(&j).ok();
+            typed_json::value_from_json(&j).ok();
+        }
+
+        #[test]
+        fn a_decoded_value_encodes_back_to_itself(j in arbitrary_json()) {
+            if let Ok(v) = typed_json::value_from_json(&j) {
+                let again = typed_json::value_from_json(&typed_json::value_to_json(&v));
+                prop_assert!(again.as_ref().is_ok_and(|a| arb::same(a, &v)), "{j} -> {again:?}");
+            }
+        }
     }
 }

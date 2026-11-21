@@ -58,7 +58,7 @@ Terms: see `glossary.md`.
 - **`$map` escapes a map whose single key starts with `$`.** Without it, such a map would be read back as a tag.
 - **Strict input.**
   - Unknown `$` tags, arrays directly inside arrays, and unknown top-level keys in a full document are errors.
-  - An envelope is recognised only by `_path` or `_updateTime`; `{"data": …}` alone is a field named `data`.
+  - An envelope is recognised only by `_path`, `_updateTime`, or a marker (`_plain`, `_select`); then fields must sit inside `data`, so `{"_select": ["a"], "a": 1}` is an error. `{"data": …}` alone is a field named `data`.
   - A full document's `_path` must match the target.
 - **Markers on output that would lose data if written back.**
   - `--plain` adds `_plain` and `set` refuses it.
@@ -70,6 +70,11 @@ Terms: see `glossary.md`.
 - **Flag values.**
   - Bare tokens are typed: numbers, `true`/`false`, `null`.
   - Leading zeros and a leading `+` stay strings.
+  - An unquoted `--set` value starting with `{` is a usage error, not a string: it is almost always a
+    map written by accident, and `--set` cannot write a map. The error says to set nested fields one by one
+    or to quote the whole op to store text; it names no other write command (`set --merge` deep-merges,
+    creates a missing document, and replaces an array). Filters keep the string reading
+    (`--where 'payload == {"x":1}'`), since users query JSON-encoded string fields.
   - Field names with spaces or operator characters need backticks, so `createdAt desc` can't silently
     become a field name.
 
@@ -150,3 +155,35 @@ Terms: see `glossary.md`.
   `.#static` too, so a broken static build is caught before tagging.
 - **Public repo.** History was rewritten before publishing: internal names were removed and authors use a
   noreply email.
+- **Coverage is report-only: no percentage gate.** A gate rewards junk tests. CI prints the table into the job
+  summary and the number feeds the badge; nothing fails on it. The number counts inline `#[cfg(test)]` code
+  too, so read it as a trend, not a score. The test-only generator module `src/domain/arb.rs` is excluded from
+  both `report` calls (`--ignore-filename-regex`), so growing generators does not move the badge.
+  - One instrumented run of every test, emulator included (`cargo llvm-cov nextest --run-ignored all` inside
+    `firebase emulators:exec`). `nix flake check` stays the gate and does not run coverage.
+  - Tooling: `cargo-llvm-cov`, with `LLVM_COV`/`LLVM_PROFDATA` taken from `pkgs.rustc.llvmPackages.llvm`
+    so they always match rustc's LLVM (nixpkgs `rustc` ships without `llvm-tools`). If it breaks, stop and
+    fix it; there is no tarpaulin fallback.
+  - Comparing before and after a change: compare missed production lines from `--lcov` output, not summary
+    totals (deleting a test also deletes covered test lines).
+- **The coverage badge comes from an orphan `badges` branch, not a third-party service.** On pushes to `main`,
+  a `badge` job force-pushes a fresh single-commit tree holding a shields.io endpoint file
+  (`coverage.json`) to `badges`, using the built-in `GITHUB_TOKEN`. No Codecov account, no secrets.
+  - In `ci.yml` the `badge` job is the only one with `contents: write` (`release.yml` has its own). It runs
+    no repo code and is skipped on every pull request, so no PR run (fork or same-repo) holds a write token. The trigger stays `pull_request`,
+    never `pull_request_target`. The coverage job keeps `contents: read` and `persist-credentials: false`.
+  - `badges` must stay unprotected (a ruleset over all branches would reject the force-push). The README
+    badge reads `raw.githubusercontent.com`, which works only while the repo is public. A newer push can
+    cancel an in-flight `badge` job (`cancel-in-progress`); the next run restores the badge.
+- **Property tests use one shared generator module and never persist failures.** Domain-value generators live
+  in `src/domain/arb.rs` (test-only) and produce only legal domain values, built through each type's own
+  constructor or parser. Generators of input text or JSON (which may be illegal on purpose) sit beside the
+  decoder they feed, because `domain` has no `serde_json`. Every generator has a fixed-seed test that it reaches
+  every class it claims, so a generator cannot quietly narrow.
+  - `failure_persistence` is off. The nix build drops `proptest-regressions/`, so replay files would not run on
+    CI. A real counterexample becomes a named example test instead.
+  - Properties are unit tests next to the code, not in `tests/`: integration tests cannot see test-only helpers.
+  - Value equality in properties is `arb::same`: any NaN equals any NaN, because typed JSON writes every NaN
+    as `"NaN"` and does not keep its sign or payload; every other double, and geo coordinates, compare by
+    bits. The protobuf properties use `arb::same_bits`, since protobuf keeps the payload. Production
+    `PartialEq` is unchanged.

@@ -1,3 +1,5 @@
+#[cfg(test)]
+pub(crate) mod arb;
 pub mod document;
 pub mod field;
 pub mod ids;

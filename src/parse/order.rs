@@ -40,37 +40,11 @@ fn direction(input: &str, text: &str) -> Result<Direction, ParseError> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
     use crate::domain::Direction;
-
-    #[test]
-    fn order_by() {
-        assert_eq!(
-            "createdAt:desc".parse::<OrderBy>().map(|o| o.direction),
-            Ok(Direction::Desc)
-        );
-        assert_eq!(
-            "createdAt".parse::<OrderBy>().map(|o| o.direction),
-            Ok(Direction::Asc)
-        );
-    }
-
-    #[test]
-    fn explicit_asc_and_nested_and_quoted_fields() {
-        assert_eq!(
-            "a.b:asc"
-                .parse::<OrderBy>()
-                .map(|o| (o.field.to_string(), o.direction)),
-            Ok(("a.b".into(), Direction::Asc))
-        );
-        let o: OrderBy = "`a:b`:desc".parse().unwrap();
-        assert_eq!(
-            (o.field.segments().to_vec(), o.direction),
-            (vec!["a:b".to_owned()], Direction::Desc)
-        );
-        let o: OrderBy = "`a:b`".parse().unwrap();
-        assert_eq!(o.field.segments(), ["a:b"]);
-    }
+    use crate::domain::arb;
 
     #[test]
     fn surrounding_spaces_are_ignored() {
@@ -95,5 +69,38 @@ mod tests {
         assert!("a:".parse::<OrderBy>().is_err());
         assert!(":desc".parse::<OrderBy>().is_err());
         assert!("".parse::<OrderBy>().is_err());
+    }
+
+    proptest! {
+        #![proptest_config(arb::config())]
+
+        #[test]
+        fn field_and_direction_parse_back(
+            field in arb::field_path(),
+            (word, direction) in prop::sample::select(vec![
+                ("asc", Direction::Asc),
+                ("desc", Direction::Desc),
+                ("ASC", Direction::Asc),
+                ("Desc", Direction::Desc),
+            ]),
+        ) {
+            prop_assert_eq!(
+                format!("{field}:{word}").parse::<OrderBy>(),
+                Ok(OrderBy { field, direction })
+            );
+        }
+
+        #[test]
+        fn a_bare_field_is_ascending(field in arb::field_path()) {
+            prop_assert_eq!(
+                field.to_string().parse::<OrderBy>(),
+                Ok(OrderBy { field, direction: Direction::Asc })
+            );
+        }
+
+        #[test]
+        fn parsing_never_panics(s in arb::text()) {
+            s.parse::<OrderBy>().ok();
+        }
     }
 }

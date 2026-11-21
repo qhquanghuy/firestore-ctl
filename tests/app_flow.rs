@@ -4,7 +4,9 @@ mod support;
 
 use std::process::ExitCode;
 
+use clap::Parser as _;
 use firectl::app::{AppError, Context, Output, Request, authorize, run};
+use firectl::cli::Cli;
 use firectl::domain::{
     AggregateQuery, Aggregation, CollectionPath, DbTarget, DeleteDoc, Direction, DocPath, Document,
     FieldOp, Fields, Filter, Guard, IndexAdvice, NonEmptyVec, Op, OrderBy, Query, Scope, SetDoc,
@@ -242,6 +244,62 @@ async fn guarded_overwrite_and_merge_check_update_time() {
             gateway(GatewayError::PreconditionFailed(path("users/u1")))
         );
     }
+}
+
+#[tokio::test]
+async fn merging_a_select_projection_changes_only_the_selected_fields() {
+    let seeded = Document {
+        data: Fields::from([
+            ("a".to_owned(), Value::Int(0)),
+            ("z".to_owned(), Value::Int(1)),
+        ]),
+        ..doc("users/u1")
+    };
+    let fs = FakeFirestore::with(seeded);
+    let cli = Cli::try_parse_from([
+        "firectl",
+        "--project",
+        "p",
+        "set",
+        "users/u1",
+        "--merge",
+        "--data",
+        r#"{"_select":["a"],"data":{"a":1}}"#,
+    ])
+    .unwrap();
+    let req = cli.into_request(std::io::empty()).unwrap();
+    exec(&ctx_writable(), &fs, req).await.unwrap();
+    assert_eq!(
+        fs.stored(&path("users/u1")).unwrap().data,
+        Fields::from([
+            ("a".to_owned(), Value::Int(1)),
+            ("z".to_owned(), Value::Int(1))
+        ])
+    );
+}
+
+#[tokio::test]
+async fn merging_a_select_projection_is_guarded_by_its_update_time() {
+    let fs = FakeFirestore::with(doc("users/u1"));
+    let cli = Cli::try_parse_from([
+        "firectl",
+        "--project",
+        "p",
+        "set",
+        "users/u1",
+        "--merge",
+        "--data",
+        r#"{"_updateTime":"2025-12-31T00:00:00Z","_select":["a"],"data":{"a":1}}"#,
+    ])
+    .unwrap();
+    let req = cli.into_request(std::io::empty()).unwrap();
+    let r = exec(&ctx_writable(), &fs, req).await;
+    assert_eq!(
+        r,
+        gateway(GatewayError::PreconditionFailed(path("users/u1")))
+    );
+    assert_eq!(exit_code_value(&r.unwrap_err()), 5);
+    assert_eq!(fs.stored(&path("users/u1")), Some(doc("users/u1")));
 }
 
 #[tokio::test]

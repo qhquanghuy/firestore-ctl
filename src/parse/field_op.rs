@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use super::{ParseError, parse_field, parse_token, split_around, unquoted};
-use crate::domain::{FieldOp, Value};
+use crate::domain::{FieldOp, FieldPath, Value};
 
 const FIELD_HINT: &str =
     "for a comparison use `==` in --where; backtick-quote unusual field names, e.g. `my-field`";
@@ -17,7 +17,7 @@ impl FromStr for FieldOp {
             .ok_or_else(|| {
                 fail("expected `field=value`, `field+=value` or `field-=value`".to_owned())
             })?;
-        let field = |text: &str| parse_field(text, FIELD_HINT).map_err(fail);
+        let field_of = |text: &str| parse_field(text, FIELD_HINT).map_err(fail);
         let text = text.trim();
         if text.starts_with('=') {
             return Err(ParseError::new(
@@ -25,15 +25,47 @@ impl FromStr for FieldOp {
                 "value starts with `=`; for a comparison use `==` in --where (quote the value to set it literally)",
             ));
         }
-        let value = parse_token(text).map_err(|e| ParseError::new(s, e.reason))?;
         let before = before.trim_end();
-        if let Some(name) = before.strip_suffix('+') {
-            Ok(Self::ArrayUnion(field(name)?, elements(s, text, value)?))
+        let (name, op) = if let Some(name) = before.strip_suffix('+') {
+            (name, Kind::Union)
         } else if let Some(name) = before.strip_suffix('-') {
-            Ok(Self::ArrayRemove(field(name)?, elements(s, text, value)?))
+            (name, Kind::Remove)
         } else {
-            Ok(Self::Set(field(before)?, value))
+            (before, Kind::Set)
+        };
+        let field = field_of(name)?;
+        if text.starts_with('{') {
+            return Err(ParseError::new(s, brace_hint(&field, op)));
         }
+        let value = parse_token(text).map_err(|e| ParseError::new(s, e.reason))?;
+        Ok(match op {
+            Kind::Union => Self::ArrayUnion(field, elements(s, text, value)?),
+            Kind::Remove => Self::ArrayRemove(field, elements(s, text, value)?),
+            Kind::Set => Self::Set(field, value),
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Set,
+    Union,
+    Remove,
+}
+
+// Examples are shell-quoted around the whole op: the shell would strip bare double quotes.
+fn brace_hint(field: &FieldPath, kind: Kind) -> String {
+    match kind {
+        Kind::Set => format!(
+            "--set cannot write a map; set nested fields one by one (--set '{field}.x=1'), \
+             or quote the whole op to store text: --set '{field}=\"{{...}}\"'"
+        ),
+        Kind::Union => format!(
+            "array elements cannot be maps; quote the whole op to store text: --set '{field}+=\"{{...}}\"'"
+        ),
+        Kind::Remove => format!(
+            "array elements cannot be maps; quote the whole op to store text: --set '{field}-=\"{{...}}\"'"
+        ),
     }
 }
 
@@ -55,8 +87,11 @@ fn elements(input: &str, text: &str, value: Value) -> Result<Vec<Value>, ParseEr
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
     use crate::domain::FieldPath;
+    use crate::domain::arb;
 
     fn fp(s: &str) -> FieldPath {
         s.parse().unwrap()
@@ -172,5 +207,85 @@ mod tests {
         let e = "when=ts:soon".parse::<FieldOp>().unwrap_err();
         assert_eq!(e.input, "when=ts:soon");
         assert!(!e.reason.contains("ts:soon:"), "{e}");
+    }
+
+    #[test]
+    fn an_unquoted_value_starting_with_a_brace_is_rejected_with_a_hint_for_the_real_field() {
+        let reason = |s: &str| s.parse::<FieldOp>().unwrap_err().reason;
+        for bad in [r#"a.b={"x":1}"#, "a.b = {}"] {
+            let r = reason(bad);
+            assert!(r.contains("--set 'a.b.x=1'"), "{bad}: {r}");
+            assert!(r.contains(r#"--set 'a.b="{...}"'"#), "{bad}: {r}");
+        }
+        for (bad, op) in [("tags+={", "+="), ("tags-={x}", "-=")] {
+            let r = reason(bad);
+            assert!(
+                r.contains(&format!(r#"--set 'tags{op}"{{...}}"'"#)),
+                "{bad}: {r}"
+            );
+            assert!(!r.contains("nested"), "{bad}: {r}");
+        }
+        assert!(!reason("a={}").contains("--merge"));
+    }
+
+    #[test]
+    fn the_suggested_quoted_form_stores_the_string() {
+        assert_eq!(
+            op(r#"a="{\"x\":1}""#),
+            FieldOp::Set(fp("a"), Value::String(r#"{"x":1}"#.into()))
+        );
+        assert_eq!(
+            op(r#"a+="{x}""#),
+            FieldOp::ArrayUnion(fp("a"), vec!["{x}".into()])
+        );
+    }
+
+    #[test]
+    fn a_brace_after_the_first_character_is_text() {
+        assert_eq!(op("a=x{"), FieldOp::Set(fp("a"), "x{".into()));
+        assert_eq!(op("a= x{}"), FieldOp::Set(fp("a"), "x{}".into()));
+    }
+
+    proptest! {
+        #![proptest_config(arb::config())]
+
+        #[test]
+        fn set_union_and_remove_of_an_integer_parse_back(
+            field in arb::field_path(),
+            symbol in prop::sample::select(vec!["=", "+=", "-="]),
+            i in any::<i64>(),
+            before in prop::sample::select(vec!["", " "]),
+            after in prop::sample::select(vec!["", " ", "  "]),
+        ) {
+            let expected = match symbol {
+                "+=" => FieldOp::ArrayUnion(field.clone(), vec![Value::Int(i)]),
+                "-=" => FieldOp::ArrayRemove(field.clone(), vec![Value::Int(i)]),
+                _ => FieldOp::Set(field.clone(), Value::Int(i)),
+            };
+            prop_assert_eq!(
+                format!("{field}{before}{symbol}{after}{i}").parse::<FieldOp>(),
+                Ok(expected)
+            );
+        }
+
+        #[test]
+        fn an_unquoted_value_starting_with_a_brace_is_always_an_error(
+            field in arb::field_path(),
+            symbol in prop::sample::select(vec!["=", "+=", "-="]),
+            after in prop::sample::select(vec!["", " ", "  "]),
+            rest in arb::text(),
+        ) {
+            let error = format!("{field}{symbol}{after}{{{rest}").parse::<FieldOp>();
+            prop_assert!(
+                error.as_ref().is_err_and(|e| e.reason.contains("{...}")),
+                "{:?}",
+                error
+            );
+        }
+
+        #[test]
+        fn parsing_never_panics(s in arb::text()) {
+            s.parse::<FieldOp>().ok();
+        }
     }
 }

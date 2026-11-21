@@ -36,8 +36,11 @@ fn split(s: &str) -> Option<(&str, Op, &str)> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
     use crate::domain::Value;
+    use crate::domain::arb;
 
     fn parts(s: &str) -> (String, Op, Value) {
         let f: Filter = s.parse().unwrap();
@@ -64,24 +67,6 @@ mod tests {
         );
         assert!("status active".parse::<Filter>().is_err());
         assert!("id in a".parse::<Filter>().is_err());
-    }
-
-    #[test]
-    fn every_operator_parses() {
-        for (text, op) in [
-            ("==", Op::Eq),
-            ("!=", Op::Ne),
-            ("<", Op::Lt),
-            ("<=", Op::Le),
-            (">", Op::Gt),
-            (">=", Op::Ge),
-            ("not-in", Op::NotIn),
-            ("array-contains-any", Op::ArrayContainsAny),
-        ] {
-            let value = if op.takes_list() { "[1, 2]" } else { "1" };
-            let f: Filter = format!("age {text} {value}").parse().unwrap();
-            assert_eq!(f.op(), op, "{text}");
-        }
     }
 
     #[test]
@@ -139,5 +124,48 @@ mod tests {
         let e = "when == ts:soon".parse::<Filter>().unwrap_err();
         assert_eq!(e.input, "when == ts:soon");
         assert!(!e.reason.contains("ts:soon:"), "{e}");
+    }
+
+    #[test]
+    fn a_brace_value_stays_a_string_in_filters() {
+        for text in [r#"payload == {"x":1}"#, r#"payload == "{\"x\":1}""#] {
+            let f: Filter = text.parse().unwrap();
+            assert_eq!(f.value(), &Value::String(r#"{"x":1}"#.into()), "{text}");
+        }
+    }
+
+    proptest! {
+        #![proptest_config(arb::config())]
+
+        #[test]
+        fn field_op_and_integer_parse_back_to_the_same_three_parts(
+            field in arb::field_path(),
+            op in prop::sample::select(Op::ALL.to_vec()),
+            i in any::<i64>(),
+            before in prop::sample::select(vec![" ", "  "]),
+            after in prop::sample::select(vec![" ", "  "]),
+        ) {
+            let (value_text, value) = if op.takes_list() {
+                (format!("[{i}]"), Value::Array(vec![Value::Int(i)]))
+            } else {
+                (i.to_string(), Value::Int(i))
+            };
+            let text = format!("{field}{before}{}{after}{value_text}", op.symbol());
+            prop_assert_eq!(
+                text.parse::<Filter>().map(|f| (f.field().clone(), f.op(), f.value().clone())),
+                Ok((field, op, value))
+            );
+        }
+
+        #[test]
+        fn parsing_never_panics(
+            field in arb::field_path(),
+            op in prop::sample::select(Op::ALL.to_vec()),
+            value in arb::text(),
+            whole in arb::text(),
+        ) {
+            format!("{field} {} {value}", op.symbol()).parse::<Filter>().ok();
+            whole.parse::<Filter>().ok();
+        }
     }
 }

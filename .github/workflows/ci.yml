@@ -27,10 +27,68 @@ jobs:
     name: end-to-end tests on the Firestore emulator
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      line-percent: ${{ steps.percent.outputs.line-percent }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+      # One instrumented run of every test (no `--test` filter), so the number covers unit,
+      # CLI, app_flow and emulator tests together. `check` already runs the normal tests;
+      # this run exists for the coverage number and does not replace it.
       - run: >-
           nix develop --command
           firebase emulators:exec --only firestore --project demo-firectl
-          'cargo nextest run --test emulator --run-ignored all'
+          'cargo llvm-cov nextest --run-ignored all --no-report'
+      - name: Coverage summary
+        shell: bash
+        run: |
+          {
+            echo '### Coverage (unit, CLI, app_flow and emulator tests)'
+            echo
+            echo '```'
+            nix develop --command cargo llvm-cov report --summary-only --ignore-filename-regex 'src/domain/arb\.rs$'
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Line coverage for the badge
+        id: percent
+        run: |
+          nix develop --command cargo llvm-cov report --json --summary-only --ignore-filename-regex 'src/domain/arb\.rs$' --output-path "$RUNNER_TEMP/coverage.json"
+          percent=$(jq -r ".data[0].totals.lines.percent" "$RUNNER_TEMP/coverage.json")
+          printf 'line-percent=%.1f\n' "$percent" >> "$GITHUB_OUTPUT"
+
+  # Separate job so no PR run holds a write token, and so the job that builds and runs repo
+  # code never has one. It runs no repo code and needs no checkout.
+  badge:
+    name: publish the coverage badge
+    needs: emulator
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      PERCENT: ${{ needs.emulator.outputs.line-percent }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Write coverage.json to the orphan `badges` branch
+        run: |
+          if ! [[ "$PERCENT" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::unexpected coverage value: $PERCENT"
+            exit 1
+          fi
+          color=$(awk -v p="$PERCENT" 'BEGIN { print (p >= 80 ? "green" : p >= 60 ? "yellow" : "red") }')
+          cd "$(mktemp -d)"
+          git init --quiet --initial-branch=badges
+          printf '{"schemaVersion":1,"label":"coverage","message":"%s%%","color":"%s"}\n' "$PERCENT" "$color" > coverage.json
+          git add coverage.json
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit --quiet --message "coverage: $PERCENT%"
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 --wrap=0)
+          echo "::add-mask::$auth"
+          # A fresh single-commit tree each time: no history growth, and it works while the branch does not exist yet.
+          git -c "http.extraheader=Authorization: Basic $auth" \
+            push --force "https://github.com/${GITHUB_REPOSITORY}.git" badges

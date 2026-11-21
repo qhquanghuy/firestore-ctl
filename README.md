@@ -1,5 +1,8 @@
 # firectl
 
+[![CI](https://github.com/qhquanghuy/firestore-ctl/actions/workflows/ci.yml/badge.svg)](https://github.com/qhquanghuy/firestore-ctl/actions/workflows/ci.yml)
+![coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/qhquanghuy/firestore-ctl/badges/coverage.json)
+
 `firectl` queries Google Cloud Firestore from the command line: read documents, run
 queries and counts, list collections and indexes, and (only where you allow it) write.
 It is built to be driven by scripts and coding agents as well as people, so output is
@@ -126,7 +129,9 @@ firectl completions zsh                          # prints the line to add to you
 In `--where`, `--set` and lists: `null`, `true`, `false`, numbers (`18`, `-3`, `1.5`),
 `"quoted text"` (escapes `\"` and `\\` only), `ts:2026-01-05T10:00:00Z`,
 `ref:users/u1`, lists `[a, "b c", 3]`. Anything else is a string; numbers with leading
-zeros (`007`) stay strings; quote a value to force a string (`"18"`).
+zeros (`007`) stay strings; quote a value to force a string (`"18"`). The one exception is
+`--set`: an unquoted value starting with `{` is a usage error (exit 2), because `--set`
+cannot write a map; see below.
 
 Dots separate nested fields (`address.city`). A name with spaces or punctuation is
 wrapped in backticks: `` `my-field` ``, `` `a b`.c ``.
@@ -137,6 +142,10 @@ wrapped in backticks: `` `my-field` ``, `` `a b`.c ``.
 union** and **array remove**, not numeric increment or decrement. `+=` adds the value (or
 each element of a list) if absent; `-=` removes every occurrence. Each field may be changed
 once per update.
+
+`--set` cannot write a map, so an unquoted value starting with `{` is rejected (exit 2). Set
+nested fields one by one (`--set 'profile.x=1'`), or quote the whole op to store the text
+(`--set 'note="{\"x\":1}"'`). `--where` still compares such a value as a string.
 
 If the field is not an array (or is missing), `+=` and `-=` do not fail: they replace it with
 an array holding the given values (`-=` leaves an empty array). Check the field first when
@@ -159,9 +168,10 @@ and tag values JSON cannot express:
 
 `set --data` takes a bare object of fields (`{"name": "Ann"}`) or a whole document as
 `get` prints it, which can be fed straight back to `set --overwrite --data -` (its `_path`
-must match the target). A whole document is recognised by its `_path` or `_updateTime`
-key; any other object is bare field data, so `{"data": {...}}` alone is a document with
-one field named `data`. With `--merge`, nested maps are merged field by field: only the
+must match the target). A whole document is recognised by a `_path`, `_updateTime`,
+`_plain` or `_select` key, and its fields must then sit inside `data`; any other object
+is bare field data, so `{"data": {...}}` alone is a document with one field named `data`.
+With `--merge`, nested maps are merged field by field: only the
 fields you give are changed, siblings (including inside nested maps) are kept. Without
 `--merge`, `--overwrite` replaces the whole document. Firestore stores timestamps with
 microsecond precision.
@@ -176,9 +186,9 @@ Two kinds of output are lossy, so they are marked and `set` refuses to write the
   field. `set --merge` accepts them and changes only the selected fields; `_select`
   itself is never stored.
 
-The `_plain` and `_select` keys are markers wherever they appear at the top level of
-`--data`, even after `_path` and `_updateTime` were stripped; to store a field with one of
-those names, use the full-document form and put it inside `data`.
+The `_plain` and `_select` keys are markers: an object with one is a whole document, so
+its fields must sit inside `data` (a marker next to flat fields is an error, exit 2); to
+store a field with one of those names, use the full-document form and put it inside `data`.
 
 ### Indexes
 
@@ -254,7 +264,12 @@ zsh, which does not split. Names that need quoting are shell-escaped for you.
 
 ## Tests
 
-Unit and CLI tests need nothing: `cargo nextest run` (inside `nix develop`).
+Unit and CLI tests need nothing: `cargo nextest run` (inside `nix develop`). They include property
+tests (`proptest`) that check laws such as parse-then-print over generated values.
+
+Coverage is report-only (no gate). `cargo llvm-cov nextest --summary-only --ignore-filename-regex 'src/domain/arb\.rs$'`
+prints the table for the tests that run without an emulator. The badge counts the emulator run as well, so
+its number is higher than the local one.
 
 The end-to-end suite in `tests/emulator.rs` runs the real binary against the Firestore
 emulator. Its tests (all but one, which runs anywhere) are `#[ignore]`d, use their own `demo-` projects, and refuse to run
