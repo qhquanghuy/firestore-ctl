@@ -24,7 +24,15 @@
         pkgs = nixpkgs.legacyPackages.${system};
         craneLib = crane.mkLib pkgs;
 
-        src = craneLib.cleanCargoSource ./.;
+        # The Cargo sources and the agent guide SKILL.md at the root, for `firectl --skill`.
+        # maybeMissing: the build does not need the guide to exist.
+        src = pkgs.lib.fileset.toSource {
+          root = ./.;
+          fileset = pkgs.lib.fileset.unions [
+            (craneLib.fileset.commonCargoSources ./.)
+            (pkgs.lib.fileset.maybeMissing ./SKILL.md)
+          ];
+        };
 
         commonArgs = {
           inherit src;
