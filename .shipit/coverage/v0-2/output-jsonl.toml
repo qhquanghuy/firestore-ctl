@@ -1,0 +1,2 @@
+DW6 = ["resolve_follows_the_output_rules", "only_get_defaults_to_json", "render_opts_map_flags", "query_prints_one_document_per_line_as_jsonl", "collections_lists_root_and_subcollections", "typed_document_survives_get_then_set_overwrite", "query_format_json_prints_one_array"]
+DW10 = ["help_states_the_output_defaults", "no_subcommand_help_mentions_writable"]
