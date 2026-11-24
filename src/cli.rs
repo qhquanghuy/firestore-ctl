@@ -449,9 +449,7 @@ impl Cmd {
             | Self::Completions { .. } => false,
         }
     }
-}
 
-impl Cmd {
     // Every command names its default: a new command must choose one here.
     #[must_use]
     pub(crate) fn default_format(&self) -> Format {
