@@ -93,7 +93,9 @@ Terms: see `glossary.md`.
   - Replaced (0.2.0, #12): tables by default on a terminal, and one JSON array in a pipe. Tables showed
     nested values as one-line JSON in a cell and took the union of all keys as columns. A script that
     parses the array, or piped `--pretty` for an indented array, adds `--format json` (or uses `jq -s`).
-- **Control characters from stored data are escaped in tables and stderr.** Stored data must not drive the terminal.
+- **Control characters from stored data are escaped in tables, JSON output and stderr.** Stored data must not
+  drive the terminal. JSON and jsonl write every control character (C0, DEL, C1) as a `\uXXXX` escape, so the
+  data is unchanged: the text parses back to the same value and `get | set --overwrite` round-trips.
 - **Index advice.**
   - Composite: print the `gcloud … composite create` command.
   - Single-field (collection group): no command, because `gcloud … fields update --index` replaces the field's

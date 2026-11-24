@@ -1,6 +1,6 @@
 //! Pure: no I/O, no environment; `main` prints the returned strings.
 
-use std::fmt::Display;
+use std::fmt::{Display, Write as _};
 use std::iter;
 use std::slice;
 
@@ -78,14 +78,28 @@ pub fn render(o: &Output, opts: &RenderOpts) -> String {
                 Layout::Pretty => format!("{json:#}"),
                 Layout::Compact => json.to_string(),
             };
-            format!("{text}\n")
+            line(&escape_json_controls(&text))
         }
         Format::Jsonl => shape(o, opts.typing)
             .records()
             .into_iter()
-            .map(|j| line(&j))
+            .map(|j| line(&escape_json_controls(&j.to_string())))
             .collect(),
     }
+}
+
+// serde_json escapes C0 but writes DEL and C1 raw. Outside strings the only raw control is the
+// pretty layout's newline, so any other control is inside a string, where `\uXXXX` keeps the value.
+fn escape_json_controls(text: &str) -> String {
+    text.chars()
+        .fold(String::with_capacity(text.len()), |mut out, c| {
+            if c != '\n' && c.is_control() {
+                write!(out, "\\u{:04x}", u32::from(c)).ok();
+            } else {
+                out.push(c);
+            }
+            out
+        })
 }
 
 fn line(text: &(impl Display + ?Sized)) -> String {
@@ -371,11 +385,13 @@ fn table_text(g: &Grid) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::arb;
     use crate::domain::{
         Aggregation, Document, Fields, Filter, OrderBy, Query, Scope, Value, required_index,
     };
     use crate::policy::WritePolicy;
     use crate::port::{AggregateResult, GatewayError, IndexInfo, IndexState, Written};
+    use proptest::prelude::*;
     use serde_json::{Value as Json, json};
 
     fn doc(path: &str, data: &[(&str, Value)]) -> Document {
@@ -432,6 +448,44 @@ mod tests {
 
     fn parse(s: &str) -> Json {
         serde_json::from_str(s).unwrap()
+    }
+
+    fn control_heavy_text() -> impl Strategy<Value = String> {
+        let c = prop_oneof![
+            3 => proptest::char::range('\0', '\u{9f}'),
+            1 => any::<char>(),
+            1 => proptest::sample::select(vec!['"', '\\', '\n', '\u{7f}', '\u{85}', '\u{9b}', '\u{2028}']),
+        ];
+        proptest::collection::vec(c, 0..=12).prop_map(String::from_iter)
+    }
+
+    proptest! {
+        #![proptest_config(arb::config())]
+
+        #[test]
+        fn json_output_has_no_control_character_but_newline_and_parses_back(
+            key in control_heavy_text(),
+            text in control_heavy_text(),
+        ) {
+            let d = doc("users/a", &[(&key, text.as_str().into())]);
+            let expected = document_json(&d, Typing::Typed, None);
+            let o = Output::Document(d);
+            for (format, layout) in [
+                (Format::Json, Layout::Compact),
+                (Format::Json, Layout::Pretty),
+                (Format::Jsonl, Layout::Compact),
+                (Format::Jsonl, Layout::Pretty),
+            ] {
+                let out = render(&o, &opts(format, layout, Typing::Typed));
+                prop_assert!(
+                    out.chars().all(|c| c == '\n' || !c.is_control()),
+                    "{format:?} {layout:?} {out:?}"
+                );
+                let parsed: Result<Json, _> = serde_json::from_str(&out);
+                let parsed = parsed.map_err(|e| format!("{e}: {out:?}"));
+                prop_assert_eq!(parsed, Ok(expected.clone()));
+            }
+        }
     }
 
     #[test]
