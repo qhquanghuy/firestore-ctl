@@ -82,10 +82,17 @@ Terms: see `glossary.md`.
 
 - **`query` returns 100 documents by default.** `--all` removes the limit; hitting the default prints a note on stderr.
 - **Output format.**
-  - On a terminal: a table, and pretty JSON when `--format json` is given.
-  - Piped: compact JSON.
-  - `jsonl` is always compact.
+  - jsonl is the default, on a terminal and in a pipe: one compact JSON value per line (a document, a
+    collection id, an index, a count, a write result). Humans and agents see the same text; it greps, feeds
+    `jq`, and can stream (#6).
+  - `get` prints one JSON document: indented on a terminal, compact in a pipe, so `get | set --data -`
+    needs no change.
+  - `--format table|json|jsonl` picks another. `--pretty` and `--compact` shape JSON only; jsonl is always
+    compact.
   - Agent-facing keys are camelCase (`_updateTime`, `collectionGroup`).
+  - Replaced (0.2.0, #12): tables by default on a terminal, and one JSON array in a pipe. Tables showed
+    nested values as one-line JSON in a cell and took the union of all keys as columns. A script that
+    parses the array, or piped `--pretty` for an indented array, adds `--format json` (or uses `jq -s`).
 - **Control characters from stored data are escaped in tables and stderr.** Stored data must not drive the terminal.
 - **Index advice.**
   - Composite: print the `gcloud … composite create` command.

@@ -83,6 +83,7 @@ Add a term here before introducing a new concept; rename code when a term change
 | adapter | An implementation of the port: real gRPC, or the in-memory fake in tests. | `GrpcFirestore` (grpc.rs), `FakeFirestore` (tests/support/fake.rs) |
 | gateway error | Failure reported by the port (not found, already exists, precondition failed, missing index, auth, permission…). "Gateway" = the port's error side. | `GatewayError` (port.rs) |
 | render | Turning an `Output`/error into text; pure, returns `String`. | `RenderOpts`, `Format`, `Layout`, `Typing` (render.rs) |
+| output format | `table`, `json` or `jsonl`; jsonl by default, json for `get`. | `Format` (render.rs), `Cmd::default_format` (cli.rs) |
 | exit code | 0 ok, 1 other, 2 usage/input, 3 document not found, 4 already exists, 5 guard failed, 6 write denied, 7 missing index, 8 auth/permission. | exit.rs |
 
 ## Auth and connection
