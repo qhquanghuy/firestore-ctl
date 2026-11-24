@@ -93,8 +93,10 @@ Completion:
   FIRECTL_PROJECT; answers are cached for 10 minutes in $XDG_CACHE_HOME/firectl).
 
 Output:
-  A table on a terminal, JSON otherwise (indented on a terminal, compact in a pipe);
-  jsonl is always compact. --format, --pretty, --compact and --plain override.
+  jsonl by default: one compact JSON value per line, on a terminal and in a pipe.
+  `get` prints one JSON document instead. JSON is indented on a terminal and
+  compact in a pipe (--pretty, --compact); jsonl is always one line.
+  --format table|json|jsonl picks another format; --plain drops the type tags.
   `query` stops at 100 documents unless --limit or --all; when it returns exactly 100 by
   default, a note on stderr says there may be more (stdout stays clean).
 
@@ -193,7 +195,7 @@ enum FormatArg {
 #[derive(Debug, Clone, Args)]
 #[command(next_help_heading = "Global options")]
 pub struct OutArgs {
-    /// Output format. Default: table on a terminal, json otherwise.
+    /// Output format. Default: jsonl; `get` prints json.
     #[arg(long, global = true, value_enum)]
     format: Option<FormatArg>,
     /// Indent JSON (default on a terminal).
