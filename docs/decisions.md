@@ -187,3 +187,13 @@ Terms: see `glossary.md`.
     as `"NaN"` and does not keep its sign or payload; every other double, and geo coordinates, compare by
     bits. The protobuf properties use `arb::same_bits`, since protobuf keeps the payload. Production
     `PartialEq` is unchanged.
+- **The check gate is ShipIt, not a script of our own.** `shipit check` (in the dev shell) runs
+  `.config/shipit.toml`'s checks (fmt, clippy, nextest) on a clean commit, counts changed files against the cap
+  (60), and writes a receipt keyed by the commit's tree. The pre-push hook (`shipit init --hook-only` in a new
+  clone) asks for a receipt only on `slice/*` branches; every other branch pushes as before. CI's `shipit` job
+  rechecks and trusts no receipt; it complements, not replaces, `nix flake check` and the emulator job.
+  - The cap and checks change only through the committed setup file, and a change to it (or to the files it
+    lists: `flake.nix`, `flake.lock`, `clippy.toml`, `rustfmt.toml`) must be a pull request of its own, merged by
+    the owner. `Cargo.toml` is not listed, although its `[lints]` table drives clippy: dependency bumps would
+    otherwise all be setup changes. A lint change there is read in review.
+  - The action is pinned to the same ShipIt commit as `flake.lock`; bump both together.
