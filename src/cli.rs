@@ -188,7 +188,7 @@ enum FormatArg {
     Table,
     /// One JSON value.
     Json,
-    /// One compact JSON document per line.
+    /// One compact JSON value per line.
     Jsonl,
 }
 
@@ -198,7 +198,7 @@ pub struct OutArgs {
     /// Output format. Default: jsonl; `get` prints json.
     #[arg(long, global = true, value_enum)]
     format: Option<FormatArg>,
-    /// Indent JSON (default on a terminal).
+    /// Indent JSON output (`get`, `--format json`; default on a terminal).
     #[arg(long, global = true, conflicts_with = "compact")]
     pretty: bool,
     /// Print JSON on one line (default when piped).
