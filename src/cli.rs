@@ -93,8 +93,10 @@ Completion:
   FIRECTL_PROJECT; answers are cached for 10 minutes in $XDG_CACHE_HOME/firectl).
 
 Output:
-  A table on a terminal, JSON otherwise (indented on a terminal, compact in a pipe);
-  jsonl is always compact. --format, --pretty, --compact and --plain override.
+  jsonl by default: one compact JSON value per line, on a terminal and in a pipe.
+  `get` prints one JSON document instead. JSON is indented on a terminal and
+  compact in a pipe (--pretty, --compact); jsonl is always one line.
+  --format table|json|jsonl picks another format; --plain drops the type tags.
   `query` stops at 100 documents unless --limit or --all; when it returns exactly 100 by
   default, a note on stderr says there may be more (stdout stays clean).
 
@@ -186,17 +188,17 @@ enum FormatArg {
     Table,
     /// One JSON value.
     Json,
-    /// One compact JSON document per line.
+    /// One compact JSON value per line.
     Jsonl,
 }
 
 #[derive(Debug, Clone, Args)]
 #[command(next_help_heading = "Global options")]
 pub struct OutArgs {
-    /// Output format. Default: table on a terminal, json otherwise.
+    /// Output format. Default: jsonl; `get` prints json.
     #[arg(long, global = true, value_enum)]
     format: Option<FormatArg>,
-    /// Indent JSON (default on a terminal).
+    /// Indent JSON output (`get`, `--format json`; default on a terminal).
     #[arg(long, global = true, conflicts_with = "compact")]
     pretty: bool,
     /// Print JSON on one line (default when piped).
@@ -208,8 +210,7 @@ pub struct OutArgs {
 }
 
 impl OutArgs {
-    #[must_use]
-    pub fn render_opts(&self, is_tty: bool) -> RenderOpts {
+    fn render_opts(&self, is_tty: bool, default: Format) -> RenderOpts {
         let format = self.format.map(|f| match f {
             FormatArg::Table => Format::Table,
             FormatArg::Json => Format::Json,
@@ -225,7 +226,14 @@ impl OutArgs {
         } else {
             Typing::Typed
         };
-        RenderOpts::resolve(is_tty, format, layout, typing)
+        RenderOpts::resolve(is_tty, format, layout, typing, default)
+    }
+}
+
+impl Cli {
+    #[must_use]
+    pub fn render_opts(&self, is_tty: bool) -> RenderOpts {
+        self.out.render_opts(is_tty, self.cmd.default_format())
     }
 }
 
@@ -439,6 +447,22 @@ impl Cmd {
             | Self::Collections { .. }
             | Self::Indexes { .. }
             | Self::Completions { .. } => false,
+        }
+    }
+
+    // Every command names its default: a new command must choose one here.
+    #[must_use]
+    pub(crate) fn default_format(&self) -> Format {
+        match self {
+            Self::Get { .. } => Format::Json,
+            Self::Query { .. }
+            | Self::Count { .. }
+            | Self::Collections { .. }
+            | Self::Indexes { .. }
+            | Self::Set { .. }
+            | Self::Update { .. }
+            | Self::Delete { .. }
+            | Self::Completions { .. } => Format::Jsonl,
         }
     }
 }
@@ -1025,26 +1049,78 @@ mod tests {
     #[test]
     fn render_opts_map_flags() {
         let opts = |args: &[&str], tty| {
-            Cli::try_parse_from(
-                ["firectl", "get", "u/1"]
-                    .into_iter()
-                    .chain(args.iter().copied()),
-            )
-            .unwrap()
-            .out
-            .render_opts(tty)
+            Cli::try_parse_from(["firectl"].into_iter().chain(args.iter().copied()))
+                .unwrap()
+                .render_opts(tty)
         };
-        assert_eq!(opts(&[], true).format, Format::Table);
-        assert_eq!(opts(&[], false).format, Format::Json);
-        assert_eq!(opts(&[], false).layout, Layout::Compact);
-        assert_eq!(opts(&["--pretty"], false).layout, Layout::Pretty);
-        assert_eq!(opts(&["--compact"], true).layout, Layout::Compact);
+        for tty in [true, false] {
+            let query = opts(&["query", "users"], tty);
+            assert_eq!(
+                (query.format, query.layout),
+                (Format::Jsonl, Layout::Compact)
+            );
+        }
+        let get = |tty| opts(&["get", "u/1"], tty);
         assert_eq!(
-            opts(&["--format", "jsonl", "--plain"], true).format,
+            (get(true).format, get(true).layout),
+            (Format::Json, Layout::Pretty)
+        );
+        assert_eq!(
+            (get(false).format, get(false).layout),
+            (Format::Json, Layout::Compact)
+        );
+        assert_eq!(
+            opts(&["get", "u/1", "--pretty"], false).layout,
+            Layout::Pretty
+        );
+        let compact_tty = opts(&["get", "u/1", "--compact"], true);
+        assert_eq!(
+            (compact_tty.format, compact_tty.layout),
+            (Format::Json, Layout::Compact)
+        );
+        let piped_pretty = opts(&["query", "users", "--pretty"], false);
+        assert_eq!(
+            (piped_pretty.format, piped_pretty.layout),
+            (Format::Jsonl, Layout::Compact)
+        );
+        let json_tty = opts(&["query", "users", "--format", "json"], true);
+        assert_eq!(
+            (json_tty.format, json_tty.layout),
+            (Format::Json, Layout::Pretty)
+        );
+        assert_eq!(
+            opts(&["query", "users", "--format", "table"], true).format,
+            Format::Table
+        );
+        assert_eq!(
+            opts(&["get", "u/1", "--format", "jsonl", "--plain"], true).format,
             Format::Jsonl
         );
-        assert_eq!(opts(&["--plain"], true).typing, Typing::Plain);
-        assert_eq!(opts(&[], true).typing, Typing::Typed);
+        assert_eq!(opts(&["get", "u/1", "--plain"], true).typing, Typing::Plain);
+        assert_eq!(opts(&["get", "u/1"], true).typing, Typing::Typed);
+    }
+
+    #[test]
+    fn only_get_defaults_to_json() {
+        let default = |args: &[&str]| {
+            Cli::try_parse_from(["firectl"].into_iter().chain(args.iter().copied()))
+                .unwrap()
+                .cmd
+                .default_format()
+        };
+        assert_eq!(default(&["get", "u/1"]), Format::Json);
+        for args in [
+            &["query", "users"][..],
+            &["count", "users"],
+            &["collections"],
+            &["indexes", "orders"],
+            &["set", "u/1", "--data", "{}"],
+            &["update", "u/1", "--set", "a=1"],
+            &["delete", "u/1"],
+            &["completions", "bash"],
+        ] {
+            assert_eq!(default(args), Format::Jsonl, "{args:?}");
+        }
     }
 
     #[test]

@@ -72,6 +72,20 @@ fn no_subcommand_help_mentions_writable() {
 }
 
 #[test]
+fn help_states_the_output_defaults() {
+    firectl()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(contains("jsonl by default").and(contains("`get` prints one JSON document")));
+    firectl()
+        .args(["query", "--help"])
+        .assert()
+        .success()
+        .stdout(contains("Default: jsonl"));
+}
+
+#[test]
 fn bad_filter_is_usage_error() {
     firectl()
         .args([

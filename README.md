@@ -6,7 +6,7 @@
 `firectl` queries Google Cloud Firestore from the command line: read documents, run
 queries and counts, list collections and indexes, and (only where you allow it) write.
 It is built to be driven by scripts and coding agents as well as people, so output is
-machine-readable JSON when piped and writes are off unless you opt a database in.
+JSON, one value per line by default, and writes are off unless you opt a database in.
 
 Run `firectl --help` for the value syntax, field quoting, typed JSON tags and exit codes;
 `firectl <command> --help` for one command.
@@ -203,10 +203,15 @@ with `--sum` or `--avg` gets the console link only.
 
 ### Output
 
-A table on a terminal, JSON otherwise (indented on a terminal, compact in a pipe); `jsonl`
-is one compact document per line. Override with `--format table|json|jsonl`, `--pretty`,
-`--compact`, `--plain`. Writes print `{"_path", "_updateTime"}`; deletes print
+jsonl by default: one compact JSON value per line, on a terminal and in a pipe. `get` prints
+one JSON document instead, indented on a terminal and compact in a pipe (`--pretty`,
+`--compact`); jsonl is always one line. `--format table|json|jsonl` picks another format;
+`--plain` drops the type tags. Writes print `{"_path", "_updateTime"}`; deletes print
 `{"_path", "deleted": true}`.
+
+Scripts that read the old single array add `--format json`: `firectl query users --format json`,
+or `firectl query users | jq -s .`. An empty result prints nothing in jsonl (zero records, zero
+lines); `jq -s .` still gives `[]`.
 
 ### Guarded writes
 

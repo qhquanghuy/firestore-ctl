@@ -73,7 +73,7 @@ async fn run() -> ExitCode {
             .exit(),
         Err(message) => Cli::command().error(ErrorKind::InvalidValue, message).exit(),
     };
-    let opts = cli.out.render_opts(io::stdout().is_terminal());
+    let opts = cli.render_opts(io::stdout().is_terminal());
 
     let is_write = cli.cmd.is_write();
     let default_limit = cli.cmd.uses_default_limit();

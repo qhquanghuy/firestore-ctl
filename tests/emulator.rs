@@ -104,7 +104,17 @@ impl Emulator {
     }
 
     fn json(&self, args: &[&str]) -> Json {
-        parse(&self.ok(args))
+        let text = self.ok(args);
+        assert_eq!(
+            text.lines().count(),
+            1,
+            "expected exactly one line of JSON, got: {text}"
+        );
+        parse(&text)
+    }
+
+    fn records(&self, args: &[&str]) -> Vec<Json> {
+        records(&self.ok(args))
     }
 
     fn create(&self, path: &str, data: &Json) {
@@ -116,10 +126,12 @@ fn parse(text: &str) -> Json {
     serde_json::from_str(text).unwrap_or_else(|e| panic!("not JSON ({e}): {text}"))
 }
 
-fn names(array: &Json) -> Vec<&str> {
-    array
-        .as_array()
-        .expect("an array")
+fn records(text: &str) -> Vec<Json> {
+    text.lines().map(parse).collect()
+}
+
+fn names(records: &[Json]) -> Vec<&str> {
+    records
         .iter()
         .map(|v| v.as_str().expect("a string"))
         .collect::<BTreeSet<_>>()
@@ -127,10 +139,8 @@ fn names(array: &Json) -> Vec<&str> {
         .collect()
 }
 
-fn paths(docs: &Json) -> Vec<&str> {
-    docs.as_array()
-        .expect("an array of documents")
-        .iter()
+fn paths(docs: &[Json]) -> Vec<&str> {
+    docs.iter()
         .map(|d| d["_path"].as_str().expect("_path"))
         .collect()
 }
@@ -333,7 +343,7 @@ fn query_filters_orders_and_limits() {
         emu.create(&format!("users/{id}"), &json!({"city": city, "age": age}));
     }
 
-    let found = emu.json(&[
+    let found = emu.records(&[
         "query",
         "users",
         "--where",
@@ -345,7 +355,7 @@ fn query_filters_orders_and_limits() {
     ]);
     assert_eq!(paths(&found), ["users/u4", "users/u1", "users/u2"]);
 
-    let range = emu.json(&[
+    let range = emu.records(&[
         "query",
         "users",
         "--where",
@@ -360,7 +370,7 @@ fn query_filters_orders_and_limits() {
     assert_eq!(paths(&range), ["users/u2", "users/u1", "users/u3"]);
     assert_eq!(range[0]["data"], json!({"age": 25}));
 
-    let skipped = emu.json(&["query", "users", "--order-by", "age", "--offset", "3"]);
+    let skipped = emu.records(&["query", "users", "--order-by", "age", "--offset", "3"]);
     assert_eq!(paths(&skipped), ["users/u3", "users/u4"]);
 }
 
@@ -370,12 +380,25 @@ fn query_prints_one_document_per_line_as_jsonl() {
     let emu = Emulator::project("jsonl");
     emu.create("users/u1", &json!({"n": 1}));
     emu.create("users/u2", &json!({"n": 2}));
-    let out = emu.ok(&["query", "users", "--order-by", "n", "--format", "jsonl"]);
+    let out = emu.ok(&["query", "users", "--order-by", "n"]);
     let lines: Vec<Json> = out.lines().map(parse).collect();
     assert_eq!(
         lines.iter().map(|d| d["_path"].clone()).collect::<Vec<_>>(),
         [json!("users/u1"), json!("users/u2")]
     );
+}
+
+#[test]
+#[ignore = "needs FIRESTORE_EMULATOR_HOST"]
+fn query_format_json_prints_one_array() {
+    let emu = Emulator::project("json-array");
+    emu.create("users/u1", &json!({"n": 1}));
+    emu.create("users/u2", &json!({"n": 2}));
+    let out = emu.ok(&["query", "users", "--order-by", "n", "--format", "json"]);
+    assert_eq!(out.lines().count(), 1, "one line: {out}");
+    let docs = parse(&out);
+    let docs = docs.as_array().expect("one JSON array");
+    assert_eq!(paths(docs), ["users/u1", "users/u2"]);
 }
 
 #[test]
@@ -407,7 +430,7 @@ fn collection_group_query_reads_every_depth() {
     emu.create("orders/o4", &json!({"total": 40}));
     emu.create("shops/s1/invoices/i1", &json!({"total": 99}));
 
-    let all = emu.json(&["query", "--group", "orders", "--order-by", "total"]);
+    let all = emu.records(&["query", "--group", "orders", "--order-by", "total"]);
     assert_eq!(
         paths(&all),
         [
@@ -418,7 +441,7 @@ fn collection_group_query_reads_every_depth() {
         ]
     );
 
-    let below = emu.json(&["query", "--group", "orders", "shops/s2"]);
+    let below = emu.records(&["query", "--group", "orders", "shops/s2"]);
     assert_eq!(
         paths(&below),
         ["shops/s2/orders/o2", "shops/s2/stalls/x1/orders/o3"]
@@ -440,10 +463,10 @@ fn collections_lists_root_and_subcollections() {
     emu.create("teams/t1", &json!({"n": 1}));
 
     assert_eq!(
-        names(&emu.json(&["collections", "users/u1"])),
+        names(&emu.records(&["collections", "users/u1"])),
         ["notes", "orders"]
     );
-    assert_eq!(names(&emu.json(&["collections"])), ["teams", "users"]);
+    assert_eq!(names(&emu.records(&["collections"])), ["teams", "users"]);
 }
 
 #[test]
@@ -621,7 +644,7 @@ fn plain_output_cannot_be_set_back() {
 fn a_select_projection_can_be_merged_but_not_overwritten() {
     let emu = Emulator::project("select-guard");
     emu.create("users/u1", &json!({"a": 1, "b": 2, "c": 3}));
-    let projected = emu.json(&["query", "users", "--select", "a,b"]);
+    let projected = emu.records(&["query", "users", "--select", "a,b"]);
     assert_eq!(projected[0]["_select"], json!(["a", "b"]));
     assert_eq!(projected[0]["data"], json!({"a": 1, "b": 2}));
 
@@ -670,7 +693,7 @@ fn a_query_stopping_at_the_default_limit_says_so_on_stderr() {
     };
     let (stdout, stderr) = run(&["query", "nums"]);
     assert_eq!(stderr, note);
-    assert_eq!(parse(&stdout).as_array().map(Vec::len), Some(100));
+    assert_eq!(records(&stdout).len(), 100);
     for args in [
         &["query", "nums", "--limit", "100"][..],
         &["query", "nums", "--all"],
@@ -680,12 +703,7 @@ fn a_query_stopping_at_the_default_limit_says_so_on_stderr() {
     }
     emu.create("nums/extra", &json!({"i": 100}));
     assert_eq!(run(&["query", "nums"]).1, note);
-    assert_eq!(
-        parse(&run(&["query", "nums", "--all"]).0)
-            .as_array()
-            .map(Vec::len),
-        Some(101)
-    );
+    assert_eq!(records(&run(&["query", "nums", "--all"]).0).len(), 101);
 }
 
 #[test]

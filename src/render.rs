@@ -1,6 +1,6 @@
 //! Pure: no I/O, no environment; `main` prints the returned strings.
 
-use std::fmt::Display;
+use std::fmt::{Display, Write as _};
 use std::iter;
 use std::slice;
 
@@ -48,8 +48,9 @@ impl RenderOpts {
         format: Option<Format>,
         layout: Option<Layout>,
         typing: Typing,
+        default: Format,
     ) -> Self {
-        let format = format.unwrap_or(if is_tty { Format::Table } else { Format::Json });
+        let format = format.unwrap_or(default);
         let layout = match (format, layout) {
             (Format::Jsonl, _) => Layout::Compact,
             (_, Some(layout)) => layout,
@@ -77,14 +78,28 @@ pub fn render(o: &Output, opts: &RenderOpts) -> String {
                 Layout::Pretty => format!("{json:#}"),
                 Layout::Compact => json.to_string(),
             };
-            format!("{text}\n")
+            line(&escape_json_controls(&text))
         }
         Format::Jsonl => shape(o, opts.typing)
             .records()
             .into_iter()
-            .map(|j| line(&j))
+            .map(|j| line(&escape_json_controls(&j.to_string())))
             .collect(),
     }
+}
+
+// serde_json escapes C0 but writes DEL and C1 raw. Outside strings the only raw control is the
+// pretty layout's newline, so any other control is inside a string, where `\uXXXX` keeps the value.
+fn escape_json_controls(text: &str) -> String {
+    text.chars()
+        .fold(String::with_capacity(text.len()), |mut out, c| {
+            if c != '\n' && c.is_control() {
+                write!(out, "\\u{:04x}", u32::from(c)).ok();
+            } else {
+                out.push(c);
+            }
+            out
+        })
 }
 
 fn line(text: &(impl Display + ?Sized)) -> String {
@@ -370,11 +385,13 @@ fn table_text(g: &Grid) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::arb;
     use crate::domain::{
         Aggregation, Document, Fields, Filter, OrderBy, Query, Scope, Value, required_index,
     };
     use crate::policy::WritePolicy;
     use crate::port::{AggregateResult, GatewayError, IndexInfo, IndexState, Written};
+    use proptest::prelude::*;
     use serde_json::{Value as Json, json};
 
     fn doc(path: &str, data: &[(&str, Value)]) -> Document {
@@ -433,52 +450,73 @@ mod tests {
         serde_json::from_str(s).unwrap()
     }
 
-    #[test]
-    fn resolve_defaults() {
-        let resolve = RenderOpts::resolve;
-        assert_eq!(
-            resolve(true, None, None, Typing::Typed).format,
-            Format::Table
-        );
-        let piped = resolve(false, None, None, Typing::Typed);
-        assert_eq!(
-            (piped.format, piped.layout),
-            (Format::Json, Layout::Compact)
-        );
-        assert_eq!(
-            resolve(true, Some(Format::Json), None, Typing::Typed).layout,
-            Layout::Pretty
-        );
+    fn control_heavy_text() -> impl Strategy<Value = String> {
+        let c = prop_oneof![
+            3 => proptest::char::range('\0', '\u{9f}'),
+            1 => any::<char>(),
+            1 => proptest::sample::select(vec!['"', '\\', '\n', '\u{7f}', '\u{85}', '\u{9b}', '\u{2028}']),
+        ];
+        proptest::collection::vec(c, 0..=12).prop_map(String::from_iter)
+    }
+
+    proptest! {
+        #![proptest_config(arb::config())]
+
+        #[test]
+        fn json_output_has_no_control_character_but_newline_and_parses_back(
+            key in control_heavy_text(),
+            text in control_heavy_text(),
+        ) {
+            let d = doc("users/a", &[(&key, text.as_str().into())]);
+            let expected = document_json(&d, Typing::Typed, None);
+            let o = Output::Document(d);
+            for (format, layout) in [
+                (Format::Json, Layout::Compact),
+                (Format::Json, Layout::Pretty),
+                (Format::Jsonl, Layout::Compact),
+                (Format::Jsonl, Layout::Pretty),
+            ] {
+                let out = render(&o, &opts(format, layout, Typing::Typed));
+                prop_assert!(
+                    out.chars().all(|c| c == '\n' || !c.is_control()),
+                    "{format:?} {layout:?} {out:?}"
+                );
+                let parsed: Result<Json, _> = serde_json::from_str(&out);
+                let parsed = parsed.map_err(|e| format!("{e}: {out:?}"));
+                prop_assert_eq!(parsed, Ok(expected.clone()));
+            }
+        }
     }
 
     #[test]
-    fn resolve_flags_override_defaults() {
-        let resolve = RenderOpts::resolve;
-        let pretty_piped = resolve(
-            false,
-            Some(Format::Json),
-            Some(Layout::Pretty),
-            Typing::Typed,
-        );
-        assert_eq!(pretty_piped.layout, Layout::Pretty);
-        let compact_tty = resolve(
-            true,
-            Some(Format::Json),
-            Some(Layout::Compact),
-            Typing::Typed,
-        );
-        assert_eq!(compact_tty.layout, Layout::Compact);
-        let jsonl = resolve(
-            true,
-            Some(Format::Jsonl),
-            Some(Layout::Pretty),
-            Typing::Typed,
-        );
-        assert_eq!(jsonl.layout, Layout::Compact);
-        assert_eq!(
-            resolve(true, None, None, Typing::Plain).typing,
-            Typing::Plain
-        );
+    fn resolve_follows_the_output_rules() {
+        let formats = [Format::Table, Format::Json, Format::Jsonl];
+        let cases = [true, false]
+            .into_iter()
+            .cartesian_product(iter::once(None).chain(formats.map(Some)))
+            .cartesian_product([None, Some(Layout::Pretty), Some(Layout::Compact)])
+            .cartesian_product([Typing::Typed, Typing::Plain])
+            .cartesian_product(formats);
+        let mut seen = 0;
+        for ((((is_tty, format), layout), typing), default) in cases {
+            let got = RenderOpts::resolve(is_tty, format, layout, typing, default);
+            let case = (is_tty, format, layout, typing, default);
+            if let Some(given) = format {
+                assert_eq!(got.format, given, "{case:?}");
+            } else {
+                assert_eq!(got.format, default, "{case:?}");
+            }
+            if got.format == Format::Jsonl {
+                assert_eq!(got.layout, Layout::Compact, "{case:?}");
+            } else if let Some(given) = layout {
+                assert_eq!(got.layout, given, "{case:?}");
+            } else {
+                assert_eq!(got.layout == Layout::Pretty, is_tty, "{case:?}");
+            }
+            assert_eq!(got.typing, typing, "{case:?}");
+            seen += 1;
+        }
+        assert_eq!(seen, 144);
     }
 
     #[test]
