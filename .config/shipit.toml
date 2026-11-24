@@ -51,7 +51,7 @@ escalate_to = { tier = 2 }
 # Roadmaps and build plans are read by every later step, so they are written one tier above the maker.
 [agents.roles.planner]
 tier = 3
-effort = "high"
+effort = "medium"
 
 [agents.roles.maker]
 tier = 2
