@@ -3,7 +3,14 @@ version = 1
 [gate]
 base = "main"
 max_files = 60
-check = ["cargo fmt --check", "cargo clippy --all-targets", "cargo nextest run"]
+# Every test runs once, under coverage, with the emulator: CI reads this run for the badge,
+# so no CI job repeats a check.
+check = [
+  "cargo fmt --check",
+  "cargo clippy --all-targets -- -D warnings",
+  "RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --document-private-items",
+  "firebase emulators:exec --only firestore --project demo-firectl 'cargo llvm-cov nextest --run-ignored all --no-report'",
+]
 setup_files = ["flake.nix", "flake.lock", "clippy.toml", "rustfmt.toml"]
 
 [gate.environment]

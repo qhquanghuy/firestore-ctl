@@ -151,8 +151,9 @@ Terms: see `glossary.md`.
 - **Releases are cut by pushing a `v*` tag, and ship a static musl binary.** A Nix-built binary links
   against `/nix/store`, so it runs only where that store exists; the `static` flake package builds a
   fully static `x86_64-unknown-linux-musl` binary instead (default package unchanged, for Nix users).
-  The tag must equal `v` plus the `Cargo.toml` version, or the release workflow fails. CI builds
-  `.#static` too, so a broken static build is caught before tagging.
+  The tag must equal `v` plus the `Cargo.toml` version, or the release workflow fails. Pull-request CI does not build
+  `.#static` (see the check gate): a broken Nix or static build is caught by the release workflow, which
+  runs `nix flake check` and builds `.#static` before publishing.
 - **Public repo.** History was rewritten before publishing: internal names were removed and authors use a
   noreply email.
 - **Coverage is report-only: no percentage gate.** A gate rewards junk tests. CI prints the table into the job
@@ -160,7 +161,7 @@ Terms: see `glossary.md`.
   too, so read it as a trend, not a score. The test-only generator module `src/domain/arb.rs` is excluded from
   both `report` calls (`--ignore-filename-regex`), so growing generators does not move the badge.
   - One instrumented run of every test, emulator included (`cargo llvm-cov nextest --run-ignored all` inside
-    `firebase emulators:exec`). `nix flake check` stays the gate and does not run coverage.
+    `firebase emulators:exec`). It is the check gate's test command, so every test runs once, locally and in CI.
   - Tooling: `cargo-llvm-cov`, with `LLVM_COV`/`LLVM_PROFDATA` taken from `pkgs.rustc.llvmPackages.llvm`
     so they always match rustc's LLVM (nixpkgs `rustc` ships without `llvm-tools`). If it breaks, stop and
     fix it; there is no tarpaulin fallback.
@@ -171,7 +172,7 @@ Terms: see `glossary.md`.
   (`coverage.json`) to `badges`, using the built-in `GITHUB_TOKEN`. No Codecov account, no secrets.
   - In `ci.yml` the `badge` job is the only one with `contents: write` (`release.yml` has its own). It runs
     no repo code and is skipped on every pull request, so no PR run (fork or same-repo) holds a write token. The trigger stays `pull_request`,
-    never `pull_request_target`. The coverage job keeps `contents: read` and `persist-credentials: false`.
+    never `pull_request_target`. The `gate` job keeps `contents: read` and `persist-credentials: false`.
   - `badges` must stay unprotected (a ruleset over all branches would reject the force-push). The README
     badge reads `raw.githubusercontent.com`, which works only while the repo is public. A newer push can
     cancel an in-flight `badge` job (`cancel-in-progress`); the next run restores the badge.
@@ -190,8 +191,9 @@ Terms: see `glossary.md`.
 - **The check gate is ShipIt, not a script of our own.** `shipit check` (in the dev shell) runs
   `.config/shipit.toml`'s checks (fmt, clippy, nextest) on a clean commit, counts changed files against the cap
   (60), and writes a receipt keyed by the commit's tree. The pre-push hook (`shipit init --hook-only` in a new
-  clone) asks for a receipt only on `slice/*` branches; every other branch pushes as before. CI's `shipit` job
-  rechecks and trusts no receipt; it complements, not replaces, `nix flake check` and the emulator job.
+  clone) asks for a receipt only on `slice/*` branches; every other branch pushes as before. CI is one `gate` job:
+  ShipIt's recheck (trusts no receipt) runs the same commands, then the coverage steps read that run, so no CI
+  job repeats a check. The Nix packaging (`nix flake check`, `.#static`) is built only by the release workflow.
   - The cap and checks change only through the committed setup file, and a change to it (or to the files it
     lists: `flake.nix`, `flake.lock`, `clippy.toml`, `rustfmt.toml`) must be a pull request of its own, merged by
     the owner. `Cargo.toml` is not listed, although its `[lints]` table drives clippy: dependency bumps would
