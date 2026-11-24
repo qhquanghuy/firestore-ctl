@@ -210,7 +210,8 @@ one JSON document instead, indented on a terminal and compact in a pipe (`--pret
 `{"_path", "deleted": true}`.
 
 Scripts that read the old single array add `--format json`: `firectl query users --format json`,
-or `firectl query users | jq -s .`.
+or `firectl query users | jq -s .`. An empty result prints nothing in jsonl (zero records, zero
+lines); `jq -s .` still gives `[]`.
 
 ### Guarded writes
 

@@ -87,6 +87,7 @@ Terms: see `glossary.md`.
     `jq`, and can stream (#6).
   - `get` prints one JSON document: indented on a terminal, compact in a pipe, so `get | set --data -`
     needs no change.
+  - An empty result prints nothing in jsonl (zero records, zero lines); `--format json` prints `[]`.
   - `--format table|json|jsonl` picks another. `--pretty` and `--compact` shape JSON only; jsonl is always
     compact.
   - Agent-facing keys are camelCase (`_updateTime`, `collectionGroup`).
