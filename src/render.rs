@@ -48,8 +48,9 @@ impl RenderOpts {
         format: Option<Format>,
         layout: Option<Layout>,
         typing: Typing,
+        default: Format,
     ) -> Self {
-        let format = format.unwrap_or(if is_tty { Format::Table } else { Format::Json });
+        let format = format.unwrap_or(default);
         let layout = match (format, layout) {
             (Format::Jsonl, _) => Layout::Compact,
             (_, Some(layout)) => layout,
@@ -434,51 +435,34 @@ mod tests {
     }
 
     #[test]
-    fn resolve_defaults() {
-        let resolve = RenderOpts::resolve;
-        assert_eq!(
-            resolve(true, None, None, Typing::Typed).format,
-            Format::Table
-        );
-        let piped = resolve(false, None, None, Typing::Typed);
-        assert_eq!(
-            (piped.format, piped.layout),
-            (Format::Json, Layout::Compact)
-        );
-        assert_eq!(
-            resolve(true, Some(Format::Json), None, Typing::Typed).layout,
-            Layout::Pretty
-        );
-    }
-
-    #[test]
-    fn resolve_flags_override_defaults() {
-        let resolve = RenderOpts::resolve;
-        let pretty_piped = resolve(
-            false,
-            Some(Format::Json),
-            Some(Layout::Pretty),
-            Typing::Typed,
-        );
-        assert_eq!(pretty_piped.layout, Layout::Pretty);
-        let compact_tty = resolve(
-            true,
-            Some(Format::Json),
-            Some(Layout::Compact),
-            Typing::Typed,
-        );
-        assert_eq!(compact_tty.layout, Layout::Compact);
-        let jsonl = resolve(
-            true,
-            Some(Format::Jsonl),
-            Some(Layout::Pretty),
-            Typing::Typed,
-        );
-        assert_eq!(jsonl.layout, Layout::Compact);
-        assert_eq!(
-            resolve(true, None, None, Typing::Plain).typing,
-            Typing::Plain
-        );
+    fn resolve_follows_the_output_rules() {
+        let formats = [Format::Table, Format::Json, Format::Jsonl];
+        let cases = [true, false]
+            .into_iter()
+            .cartesian_product(iter::once(None).chain(formats.map(Some)))
+            .cartesian_product([None, Some(Layout::Pretty), Some(Layout::Compact)])
+            .cartesian_product([Typing::Typed, Typing::Plain])
+            .cartesian_product(formats);
+        let mut seen = 0;
+        for ((((is_tty, format), layout), typing), default) in cases {
+            let got = RenderOpts::resolve(is_tty, format, layout, typing, default);
+            let case = (is_tty, format, layout, typing, default);
+            if let Some(given) = format {
+                assert_eq!(got.format, given, "{case:?}");
+            } else {
+                assert_eq!(got.format, default, "{case:?}");
+            }
+            if got.format == Format::Jsonl {
+                assert_eq!(got.layout, Layout::Compact, "{case:?}");
+            } else if let Some(given) = layout {
+                assert_eq!(got.layout, given, "{case:?}");
+            } else {
+                assert_eq!(got.layout == Layout::Pretty, is_tty, "{case:?}");
+            }
+            assert_eq!(got.typing, typing, "{case:?}");
+            seen += 1;
+        }
+        assert_eq!(seen, 144);
     }
 
     #[test]
