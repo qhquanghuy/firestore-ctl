@@ -110,3 +110,6 @@ Add a term here before introducing a new concept; rename code when a term change
 | coverage badge | README badge fed by `coverage.json` on the orphan `badges` branch; line coverage of the last `main` run. |
 | property test | A `proptest` test asserting a law (e.g. parse then print is the identity) over generated values, not hand-picked examples. |
 | generator | A `proptest` strategy. Domain-value generators live in `domain::arb` and build only legal values; input-text or JSON generators sit beside their decoder. A fixed-seed test checks each reaches every class it claims. |
+| check gate | `shipit check`: size cap, fmt, clippy, rustdoc and every test (emulator included, under coverage) on a clean commit. Set in `.config/shipit.toml`; changed only by a pull request of its own. |
+| receipt | ShipIt's record that the check gate passed for one commit tree. The pre-push hook asks for it on `slice/*` branches; CI never trusts it and rechecks. |
+| slice | ShipIt's word for one complete pull request under the cap, on a `slice/<goal>/<name>` branch. |

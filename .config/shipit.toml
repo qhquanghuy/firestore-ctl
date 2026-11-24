@@ -1,0 +1,80 @@
+version = 1
+
+[gate]
+base = "main"
+max_files = 60
+# Every test runs once, under coverage, with the emulator: CI reads this run for the badge,
+# so no CI job repeats a check.
+check = [
+  "cargo fmt --check",
+  "cargo clippy --all-targets -- -D warnings",
+  "RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --document-private-items",
+  "firebase emulators:exec --only firestore --project demo-firectl 'cargo llvm-cov nextest --run-ignored all --no-report'",
+]
+setup_files = ["flake.nix", "flake.lock", "clippy.toml", "rustfmt.toml"]
+
+[gate.environment]
+prefix = ["nix", "develop", "--command"]
+
+# The Claude model pack: which model does which job, and why.
+# Tier numbers are written out, so a role can name its tier and a reviewer can be put one above.
+[agents]
+# A failed review is fixed at most this many times before the owner is asked.
+max_fix_rounds = 2
+# No agent works above this effort; the owner raises it on purpose.
+effort_cap = "high"
+
+[[agents.tiers]]
+tier = 1
+model = "haiku"
+
+[[agents.tiers]]
+tier = 2
+model = "sonnet"
+
+[[agents.tiers]]
+tier = 3
+model = "opus"
+
+[[agents.tiers]]
+tier = 4
+model = "fable"
+# Where tier 4 is not available, the tier below stands in at this effort.
+stand_in = { model = "opus", effort = "high" }
+
+# The scout reads and reports cheaply; after one retry it steps up a tier.
+[agents.roles.scout]
+tier = 1
+retries = 1
+escalate_to = { tier = 2 }
+
+# Roadmaps and build plans are read by every later step, so they are written one tier above the maker.
+[agents.roles.planner]
+tier = 3
+effort = "high"
+
+[agents.roles.maker]
+tier = 2
+effort = "high"
+
+[agents.roles.tester]
+tier = 3
+effort = "medium"
+
+# The reader explains a change without the build plan; a cheap model is enough for that.
+[agents.roles.reader]
+tier = 1
+
+[agents.parallel]
+slices = 3
+agents = 4
+
+[packs]
+skill = "superpowers"
+domain = "coding"
+model = "claude"
+
+[owner]
+max_lines = 30
+status_update_max_lines = 10
+example_max_lines = 15

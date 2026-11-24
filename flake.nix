@@ -5,6 +5,9 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
+    # The ShipIt CLI (`shipit check`, `verify`, `pre-push`) in the dev shell. Own nixpkgs: its
+    # toolchain stays as ShipIt tested it.
+    shipit.url = "github:qhquanghuy/shipit";
   };
 
   outputs =
@@ -12,6 +15,7 @@
       nixpkgs,
       crane,
       flake-utils,
+      shipit,
       ...
     }:
     flake-utils.lib.eachDefaultSystem (
@@ -93,6 +97,7 @@
             pkg-config
             firebase-tools
             jdk21_headless
+            shipit.packages.${system}.default
           ];
         };
       }
